@@ -7,6 +7,6 @@ def patch_sdk_version():
     mock_version_module.SDK_VERSION = "2.0.6.1"
     sys.modules['sdk._version'] = mock_version_module
 
-    print("✅ SDK Version gepatcht: 2.0.6.1")
+    print("✅ SDK Version patched: 2.0.6.1")
 
 patch_sdk_version()
