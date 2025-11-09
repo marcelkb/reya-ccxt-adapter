@@ -1,7 +1,7 @@
 # Reya CCXT Adapter 
 A CCXT-compatible adapter/wrapper for the Reya Python SDK. It maps Reya SDK methods onto familiar CCXT interfaces.
 
-- CCXT: https://docs.ccxt.com/
+- CCXT: https://github.com/ccxt/ccxt
 - Reya SDK (Python): https://github.com/Reya-Labs/reya-python-sdk
 
 # Features
@@ -100,9 +100,10 @@ from sdk.reya_rest_api import TradingConfig
 # Restriction in Version 2.0.6.1
 As of now (09.11.2025) the reya sdk version 2.0.6.1 trys to read the "pyproject.toml" which is not beeing exported and not
 on the right location.
-to make it work right now you need to import
+To make it work you need to import
 
 ```
 import reya_ccxt_adapter.sdk_patch 
 ```
-which patches the _version.py to set version manually to 2.0.6.1
+
+which patches the _version.py to set the version manually to 2.0.6.1
