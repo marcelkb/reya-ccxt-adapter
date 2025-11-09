@@ -1,10 +1,10 @@
 # Reya CCXT Adapter 
 A CCXT-compatible adapter/wrapper for the Reya Python SDK. It maps Reya SDK methods onto familiar CCXT interfaces.
 
-CCXT: https://docs.ccxt.com/
-Reya SDK (Python): https://github.com/Reya-Labs/reya-python-sdk
+- CCXT: https://docs.ccxt.com/
+- Reya SDK (Python): https://github.com/Reya-Labs/reya-python-sdk
 
-#Features
+# Features
 - CCXT-style API backed by the Reya SDK
 - Simple environment-based configuration
 - Python 3.11+ support, aiohttp till 3.9.3
