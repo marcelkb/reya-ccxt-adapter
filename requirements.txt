@@ -1,0 +1,4 @@
+python-dotenv
+ccxt
+reya-python-sdk
+aiohttp==3.9.3
