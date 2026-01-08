@@ -37,6 +37,7 @@ from decimal import Decimal
 from io import UnsupportedOperation
 from typing import Optional, Dict, Any, List
 
+from ccxt import InvalidOrder
 from ccxt.base.types import Str, Int, FundingRate, OrderSide, Num, Strings
 
 from reya_ccxt_adapter.abstract.Reya import ImplicitAPI
@@ -415,7 +416,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 'option': False,
                 'active': None,
                 'precision': {'amount': self._decimal_places(m.get('tickSize'))},
-                'limits': {'cost': {'min': 1}},
+                'limits': {'cost': {'min': 1}, 'amount': {'min': m.get('minOrderQty')}},
                 'info': m,
             })
         return out
@@ -479,6 +480,10 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             'interval': '1h',
         }
 
+    def load_markets(self, reload=False, params={}):
+        if self.client._initialized == False:
+            run_async(self.client.start())
+        return super().load_markets(reload=reload, params=params)
 
     def fetch_ticker(self, symbol: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         self.load_markets()
@@ -842,7 +847,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                     'info': raw,
                     'position': position,
                     'id': raw.get('unique_id'),
-                    'symbol': symbol,
+                    'symbol': self.convertSymbolToCcxtNotation(symbol),
                     'timestamp': None,
                     'datetime': None,
                     'isolated': True,
@@ -874,13 +879,27 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             return result
         else:
             for res in result:
-                if res['symbol'] == symbol:
+                if res['symbol'] == self.convertSymbolToCcxtNotation(symbol):
                     return res
 
     # -------------------
     # Private / wallet & orders
     # -------------------
 
+    def fetch_positions(self, symbols: Strings = None, params={}):
+        positions = []
+        if symbols is None:
+            for symbol in self.symbols:
+                if "ETH" in symbol or "BTC" in symbol or "SOL" in symbol:
+                    pos =self.fetch_position(symbol)
+                    if pos is not None:
+                        positions.append(pos)
+        else:
+            for symbol in symbols:
+                pos = self.fetch_position(symbol)
+                if pos is not None:
+                    positions.append(pos)
+        return positions
 
     def create_order(self, symbol: str, type: str, side: str, amount: float, price: Optional[float] = None, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
@@ -903,13 +922,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         account_id = params.get('accountId') or self.safe_value(self.options, 'account_id')
         if account_id is None:
             raise RuntimeError("create_order requires accountId either in params or options['account_id']")
+
         reduceOnly = False
         symbol = self.convertSymbolToReyaNotation(symbol)
 
         if type == EOrderType.LIMIT.value:
             time_in_force = TimeInForce.GTC
             limit_params = LimitOrderParameters(
-                market_id=int(market_id) if market_id is not None else None,
                 symbol=symbol,
                 is_buy=True if side.lower() == 'buy' else False,
                 limit_px=str(price) if price is not None else None,
@@ -918,9 +937,10 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 expires_after=params.get('expires_after')
             )
         else:
+            if price is None:
+                raise RuntimeError("price needed, also for market orders to apply slippage protection")
             time_in_force = TimeInForce.IOC
             limit_params = LimitOrderParameters(
-                market_id=int(market_id) if market_id is not None else None,
                 symbol=symbol,
                 is_buy=True if side.lower() == 'buy' else False,
                 limit_px=str(price) if price is not None else None,
@@ -935,9 +955,8 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 takeProfitPrice = params['takeProfitPrice']
                 result:CreateOrderResponse = run_async(self.client.create_trigger_order(
                     TriggerOrderParameters(
-                        market_id=int(market_id),
                         symbol=symbol,
-                        is_buy=False,
+                        is_buy=side.lower() == "buy",
                         trigger_px=str(takeProfitPrice),
                         trigger_type=OrderType.TP,
                     )
@@ -946,9 +965,8 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 stopLossPrice = params['stopLossPrice']
                 result:CreateOrderResponse = run_async(self.client.create_trigger_order(
                     TriggerOrderParameters(
-                        market_id=int(market_id),
                         symbol=symbol,
-                        is_buy=False,
+                        is_buy=side.lower() == "buy",
                         trigger_px=str(stopLossPrice),
                         trigger_type=OrderType.SL,
                     )
@@ -961,10 +979,16 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         id = None
         status = "open"
         if result is not None:
-            id = result.order_id
-            status = result.status
+            if result.status is not None:
+                status = result.status
+            if result.order_id is not None:
+                id = result.order_id
+            else:
+                if type == EOrderType.MARKET.value:
+                    id = "FilledOrderPlaceholderId"
         else:
-            result = {}
+            # result = {}
+            raise InvalidOrder(self.id + ' ' + self.json(result))
             return None
 
 
