@@ -794,6 +794,9 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
                 marketData = self.get_market_data(self.convertSymbolToCcxtNotation(symbol))
                 side = EOrderSide.BUY.value if raw.get('side') == 'B' else EOrderSide.SELL.value
+                if side == EOrderSide.SELL:
+                    if base_amount > 0:
+                        base_amount = -base_amount
                 try:
                     if side == EOrderSide.BUY:
                         marketFundingValue = float(marketData["longFundingValue"])
@@ -802,11 +805,10 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                         marketFundingValue = float(marketData["shortFundingValue"])
                         marketBaseMultiplier = float(marketData["shortBaseMultiplier"])
 
-                    funding_value = ((marketFundingValue - avgEntryFundingValue) * base_amount) / marketBaseMultiplier
+                    funding_value = -1 * ((marketFundingValue - avgEntryFundingValue) * base_amount) / marketBaseMultiplier
                 except Exception as e:
-                    logger.error(e)
+                    print(str(e))
                     funding_value = 0
-
 
 
                 # #avg_entry = safe_div(self.safe_number(raw, 'average_entry_funding_value'), base_multiplier)
