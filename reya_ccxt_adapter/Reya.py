@@ -121,6 +121,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                         "/wallet/{wallet_address}/accountBalances":1,
                         "api/trading/wallet/{address}/accounts/balances": 1,
                         "api/trading/wallet/{wallet_address}/leverages": 1,
+                        "api/trading/market/{symbol}/data": 1,
                         "/v2/wallet/{address}/accounts":1,
                         "/v2/wallet/{wallet_address}/openOrders":1,
                         "wallet/{address}/perpExecutions":1,
@@ -744,7 +745,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             if market_id in lev_map_by_id:
                 symbol_lev_map[symbol] = lev_map_by_id[market_id]
 
-        self.lev_map = symbol_lev_map
+        self.lev_map = lev_map_by_id
 
         # If a symbol (or list of symbols) was provided, return only those
         if symbols:
@@ -754,11 +755,11 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             for sym in symbols:
                 if sym not in self.markets:
                     raise ccxt.ExchangeError(f"{self.id} fetch_leverage symbol {sym} not found in markets")
-                result[sym] = self.lev_map.get(sym, 3)  # Default = 3
+                result[sym] = symbol_lev_map.get(sym, 3)  # Default = 3
             return result if len(result) > 1 else list(result.values())[0]
 
         # Otherwise return all leverages
-        return self.lev_map
+        return symbol_lev_map
 
     def fetch_position(self, symbol: str, params={}):
         # [
@@ -789,7 +790,20 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 # #use avg price?
                 last_price = self.safe_number(raw, 'last_price')
                 # realized_pnl = safe_div(self.safe_number(raw, 'realized_pnl'), base_multiplier)
-                funding_value = self.safe_number(raw, 'avgEntryFundingValue')
+                avgEntryFundingValue = self.safe_number(raw, 'avgEntryFundingValue')
+
+                marketData = self.get_market_data(self.convertSymbolToCcxtNotation(symbol))
+                side = EOrderSide.BUY.value if raw.get('side') == 'B' else EOrderSide.SELL.value
+                if side == EOrderSide.BUY:
+                    marketFundingValue = float(marketData["longFundingValue"])
+                    marketBaseMultiplier = float(marketData["longBaseMultiplier"])
+                else:
+                    marketFundingValue = float(marketData["shortFundingValue"])
+                    marketBaseMultiplier = float(marketData["shortBaseMultiplier"])
+
+                funding_value = ((marketFundingValue - avgEntryFundingValue) * base_amount) / marketBaseMultiplier
+
+
                 # #avg_entry = safe_div(self.safe_number(raw, 'average_entry_funding_value'), base_multiplier)
                 #
                 # # session = int(self.safe_number(raw, 'session'))
@@ -810,8 +824,8 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
                 pnl = base_amount * (mark_price - avg_entry)
 
-                if funding_value < 0:
-                    pnl = pnl + funding_value
+                pnl = pnl + funding_value
+
                 if base_amount == 0: #0er position manuell filter
                     continue
 
@@ -852,7 +866,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                     'datetime': None,
                     'isolated': True,
                     'hedged': None,
-                    'side': EOrderSide.BUY.value if raw.get('side') == 'B' else EOrderSide.SELL.value,
+                    'side': side,
                     'contracts': position["size"],
                     'amount': position["size"],
                     'contractSize': None,
@@ -871,6 +885,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                     'liquidationPrice': position["liquidationPrice"],
                     'marginMode': False,
                     'percentage': self.parse_number(50),
+                    'fundingValue': funding_value,
                 })
 
                 result.append(safePosition)
@@ -1184,6 +1199,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     def get_current_stake_apy(self):
         request = {"pool_id": 1}
         return self.public_apy(request)
+
+    def get_market_data(self, symbol):
+        self.load_markets()
+        market = self.market(symbol)
+        request = {"symbol": market['id']}
+
+        return self.public_get_market_data(request)
 
     def close(self):
         return run_async(self.client.close())

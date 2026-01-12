@@ -25,6 +25,7 @@ class ImplicitAPI:
     public_get_leverages = publicGetLeverages = Entry('api/trading/wallet/{wallet_address}/leverages', 'public', 'GET', {'cost': 1})
     public_apy = publicGetAPY = Entry('api/trading/poolBalance/{pool_id}', 'public', 'GET',
                                                       {'cost': 1})
+    public_get_market_data = publicGetMarketData = Entry('api/trading/market/{symbol}/data', 'public', 'GET', {'cost': 1})
 
     #old api
     public_get_api_accounts_balance_v1 = publicGetApiAccountsBalanceV1 = Entry('api/accounts/balance', 'public',
