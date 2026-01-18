@@ -165,7 +165,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
     def __init__(self, config: Dict[str, Any] = {}):
         super().__init__(config)
-        self.client: ReyaTradingClient = ReyaTradingClient()
+        self.client: ReyaTradingClient = ReyaTradingClient(private_key=config["privateKey"] if "privateKey" in config else None)
 
     # -------------------
     # Signing: call SDK signer only for private endpoints, TODO right now not working good
