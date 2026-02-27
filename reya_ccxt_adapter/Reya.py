@@ -416,7 +416,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 'future': False,
                 'option': False,
                 'active': None,
-                'precision': {'amount': self._decimal_places(m.get('tickSize'))},
+                'precision': {'amount': self._decimal_places(m.get('qtyStepSize'))},
                 'limits': {'cost': {'min': 1}, 'amount': {'min': m.get('minOrderQty')}},
                 'info': m,
             })
