@@ -766,26 +766,34 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 symbol = self.convertSymbolToReyaNotation(symbol)
             if symbol is not None and raw.get("symbol") == symbol:
                 base_amount = self.safe_number(raw, 'qty')
-                mark_price = self.fetch_ticker(self.convertSymbolToCcxtNotation(symbol))['last']
+                try:
+                    mark_price = self.fetch_ticker(self.convertSymbolToCcxtNotation(symbol))['last']
+                except Exception as e:
+                    mark_price = None
+                    continue
                 # #use avg price?
                 last_price = self.safe_number(raw, 'last_price')
                 # realized_pnl = safe_div(self.safe_number(raw, 'realized_pnl'), base_multiplier)
                 avgEntryFundingValue = self.safe_number(raw, 'avgEntryFundingValue')
 
-                marketData = self.get_market_data(self.convertSymbolToCcxtNotation(symbol))
+                try:
+                    marketData = self.get_market_data(self.convertSymbolToCcxtNotation(symbol))
+                except Exception as e:
+                    marketData = None
                 side = EOrderSide.BUY.value if raw.get('side') == 'B' else EOrderSide.SELL.value
                 if side == EOrderSide.SELL:
                     if base_amount > 0:
                         base_amount = -base_amount
                 try:
-                    if side == EOrderSide.BUY:
-                        marketFundingValue = float(marketData["longFundingValue"])
-                        marketBaseMultiplier = float(marketData["longBaseMultiplier"])
-                    else:
-                        marketFundingValue = float(marketData["shortFundingValue"])
-                        marketBaseMultiplier = float(marketData["shortBaseMultiplier"])
+                    if marketData is not None:
+                        if side == EOrderSide.BUY:
+                            marketFundingValue = float(marketData["longFundingValue"])
+                            marketBaseMultiplier = float(marketData["longBaseMultiplier"])
+                        else:
+                            marketFundingValue = float(marketData["shortFundingValue"])
+                            marketBaseMultiplier = float(marketData["shortBaseMultiplier"])
 
-                    funding_value = -1 * ((marketFundingValue - avgEntryFundingValue) * base_amount) / marketBaseMultiplier
+                        funding_value = -1 * ((marketFundingValue - avgEntryFundingValue) * base_amount) / marketBaseMultiplier
                 except Exception as e:
                     print(str(e))
                     funding_value = 0
@@ -816,10 +824,16 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 if base_amount == 0: #0er position manuell filter
                     continue
 
-                leverage = self.fetch_leverage(self.convertSymbolToCcxtNotation(symbol))
+                try:
+                    leverage = self.fetch_leverage(self.convertSymbolToCcxtNotation(symbol))
+                except Exception as e:
+                    leverage = 3
                 liquidationPrice = avg_entry * (1 - 1/leverage)
 
-                orders = self.fetch_open_orders(self.convertSymbolToCcxtNotation(symbol))
+                try:
+                    orders = self.fetch_open_orders(self.convertSymbolToCcxtNotation(symbol))
+                except Exception as e:
+                    orders = []
                 tp = 0
                 sl = 0
                 for order in orders:
@@ -884,6 +898,158 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 if res['symbol'] == self.convertSymbolToCcxtNotation(symbol):
                     return res
 
+
+    def _fetch_positions(self, params={}):
+        # [
+        #     {
+        #         "exchangeId": 1,
+        #         "symbol": "BTCRUSDPERP",
+        #         "accountId": 12345,
+        #         "qty": "1.5",
+        #         "side": "B",
+        #         "avgEntryPrice": "43000.00",
+        #         "avgEntryFundingValue": "100.25",
+        #         "lastTradeSequenceNumber": 152954
+        #     }
+        # ]
+
+        request = {"wallet_address": self.walletAddress}
+        positions = self.public_get_positions(self.extend(request, params or {}))
+        if positions is []:
+            return []
+
+        result = []
+        for raw in positions:
+            symbol = raw.get("symbol")
+            base_amount = self.safe_number(raw, 'qty')
+            try:
+                mark_price = self.fetch_ticker(self.convertSymbolToCcxtNotation(symbol))['last']
+            except Exception as e:
+                mark_price = None
+                continue
+            # #use avg price?
+            last_price = self.safe_number(raw, 'last_price')
+            # realized_pnl = safe_div(self.safe_number(raw, 'realized_pnl'), base_multiplier)
+            avgEntryFundingValue = self.safe_number(raw, 'avgEntryFundingValue')
+
+            try:
+                marketData = self.get_market_data(self.convertSymbolToCcxtNotation(symbol))
+            except Exception as e:
+                marketData = None
+            side = EOrderSide.BUY.value if raw.get('side') == 'B' else EOrderSide.SELL.value
+            if side == EOrderSide.SELL:
+                if base_amount > 0:
+                    base_amount = -base_amount
+            try:
+                if marketData is not None:
+                    if side == EOrderSide.BUY:
+                        marketFundingValue = float(marketData["longFundingValue"])
+                        marketBaseMultiplier = float(marketData["longBaseMultiplier"])
+                    else:
+                        marketFundingValue = float(marketData["shortFundingValue"])
+                        marketBaseMultiplier = float(marketData["shortBaseMultiplier"])
+
+                    funding_value = -1 * ((marketFundingValue - avgEntryFundingValue) * base_amount) / marketBaseMultiplier
+            except Exception as e:
+                print(str(e))
+                funding_value = 0
+
+
+            # #avg_entry = safe_div(self.safe_number(raw, 'average_entry_funding_value'), base_multiplier)
+            #
+            # # session = int(self.safe_number(raw, 'session'))
+            # # filledOrders = self.fetch_closed_orders(symbol=symbol)
+            # # #für akt position relevant
+            # # total_cost = 0.0
+            # # total_qty = 0.0
+            # # count = 0
+            # # for filled in filledOrders:
+            # #     if int(filled["info"]["position_session"]) == session and filled['side'] == EOrderSide.BUY.value:
+            # #         filledPrice = float(filled["price"])
+            # #         filledAmount = float(filled["amount"])
+            # #         total_cost += filledPrice * filledAmount
+            # #         total_qty += filledAmount
+            # #         count += 1
+            # # avg_entry = total_cost / total_qty if total_qty > 0 else None
+            avg_entry = self.safe_number(raw, 'avgEntryPrice')
+
+            pnl = base_amount * (mark_price - avg_entry)
+
+            pnl = pnl + funding_value
+
+            if base_amount == 0: #0er position manuell filter
+                continue
+
+            try:
+                leverage = self.fetch_leverage(self.convertSymbolToCcxtNotation(symbol))
+            except Exception as e:
+                leverage = 3
+            liquidationPrice = avg_entry * (1 - 1/leverage)
+
+            try:
+                orders = self.fetch_open_orders(self.convertSymbolToCcxtNotation(symbol))
+            except Exception as e:
+                orders = []
+            tp = 0
+            sl = 0
+            for order in orders:
+                if ("params" in order and "takeProfitPrice" in order['params']) or order['info']['order_type'] == "Take Profit":
+                    tp = order['price']
+                if ("params" in order and "stopLossPrice" in order['params']) or order['info']['order_type'] == "Stop Loss":
+                    sl = order['price']
+
+            position = {
+                "size": base_amount,
+                "entryPrice": avg_entry,  # API doesn't give entry price, fallback to last_price
+                "lastPrice": mark_price,
+                "positionValue": base_amount * last_price if base_amount is not None and last_price is not None else None,
+                "unrealisedPnl": pnl,  # no unrealized from API, using realized for now
+                "takeProfit": tp,
+                "stopLoss": sl,
+                "liquidationPrice": liquidationPrice,
+                "fundingValue": funding_value,
+            }
+
+            raw["size"] = base_amount
+            raw["curRealisedPnl"] = 0
+            raw["unrealisedPnl"] = pnl
+
+            safePosition = self.safe_position({
+                'info': raw,
+                'position': position,
+                'id': raw.get('unique_id'),
+                'symbol': self.convertSymbolToCcxtNotation(symbol),
+                'timestamp': None,
+                'datetime': None,
+                'isolated': True,
+                'hedged': None,
+                'side': side,
+                'contracts': position["size"],
+                'amount': position["size"],
+                'contractSize': None,
+                'entryPrice': position["entryPrice"],
+                'markPrice': mark_price,
+                'notional': position["positionValue"],
+                'leverage': leverage,
+                'collateral': 0,
+                'initialMargin': self.parse_number(1),
+                'maintenanceMargin': None,
+                'initialMarginPercentage': None,
+                'maintenanceMarginPercentage': None,
+                'unrealizedPnl': position["unrealisedPnl"],
+                'takeProfitPrice': position["takeProfit"],
+                'stopLossPrice': position["stopLoss"],
+                'liquidationPrice': position["liquidationPrice"],
+                'marginMode': False,
+                'percentage': self.parse_number(50),
+                'fundingValue': funding_value,
+            })
+
+            result.append(safePosition)
+
+        return result
+
+
     # -------------------
     # Private / wallet & orders
     # -------------------
@@ -891,11 +1057,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     def fetch_positions(self, symbols: Strings = None, params={}):
         positions = []
         if symbols is None:
-            for symbol in self.symbols:
-                if "ETH" in symbol or "BTC" in symbol or "SOL" in symbol:
-                    pos =self.fetch_position(symbol)
-                    if pos is not None:
-                        positions.append(pos)
+            return self._fetch_positions(params)
         else:
             for symbol in symbols:
                 pos = self.fetch_position(symbol)
