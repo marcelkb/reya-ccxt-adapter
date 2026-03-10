@@ -37,7 +37,7 @@ from decimal import Decimal
 from io import UnsupportedOperation
 from typing import Optional, Dict, Any, List
 
-from ccxt import InvalidOrder
+from ccxt import InvalidOrder, NotSupported
 from ccxt.base.types import Str, Int, FundingRate, OrderSide, Num, Strings
 
 from reya_ccxt_adapter.abstract.Reya import ImplicitAPI
@@ -160,6 +160,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 "account_id": None,
                 # control fetch_tickers concurrency (batch size). None -> full parallel
                 "tickers_batch_size": None,
+                "proxy_ohlcv": False,
             },
         })
 
@@ -363,8 +364,16 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     #     self.markets_by_id = self.markets
     #     return self.markets
 
+    K_PREFIX_TOKENS = {'kPEPE', 'kBONK', 'kFLOKI', 'kSHIB', 'kDOGE', 'kNEIRO'}
+
     def _getSymbol(self, perp_name):
-        return perp_name.replace('RUSDPERP', '')
+        symbol = perp_name.replace('RUSDPERP', '')
+        # Restore lowercase 'k' prefix (e.g. KPEPE -> kPEPE)
+        if symbol.startswith('K') and len(symbol) > 1 and symbol[1].isupper():
+            lower_k_symbol = 'k' + symbol[1:]
+            if lower_k_symbol in self.K_PREFIX_TOKENS:
+                symbol = lower_k_symbol
+        return symbol
 
     def convertSymbolToCcxtNotation(self, symbol):
         if "/RUSD:RUSD" not in symbol:
@@ -375,6 +384,12 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     def convertSymbolToReyaNotation(self, symbol):
         if "RUSDPERP" not in symbol:
             symbol = symbol.replace("/RUSD:RUSD", "RUSDPERP")
+        if symbol.startswith('K') and len(symbol) > 1 and symbol[1].isupper():
+            lower_k_symbol = 'k' + symbol[1:]
+            # Strip suffix to check base token
+            base = lower_k_symbol.replace('RUSDPERP', '').replace('/RUSD:RUSD', '')
+            if base in self.K_PREFIX_TOKENS:
+                symbol = lower_k_symbol
         return symbol
 
     def _decimal_places(self, x):
@@ -491,6 +506,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         market = self.market(symbol)
         markTokenTicker = market['base'] + "RUSDPERP"
 
+        if markTokenTicker.startswith('K') and len(markTokenTicker) > 1 and markTokenTicker[1].isupper():
+            lower_k_symbol = 'k' + symbol[1:]
+            # Strip suffix to check base token
+            base = lower_k_symbol.replace('RUSDPERP', '').replace('/RUSD:RUSD', '')
+            if base in self.K_PREFIX_TOKENS:
+                markTokenTicker = base + "RUSDPERP"
+
         request = {"symbol": markTokenTicker}
         raw = self.public_get_api_trading_prices(self.extend(request, params or {}))
         parsed = self.parse_ticker(raw)
@@ -502,10 +524,99 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     def fetch_order_book(self, symbol: str, limit: Optional[int] = 100, params: Optional[Dict] = None) -> Dict[str, Any]:
         raise NotImplementedError
 
-    def fetch_ohlcv(self, symbol: str, timeframe='1m', since: Int = None, limit: Int = None, params={}) -> List[list]:
-        exchange_delegate = ccxt.binance() # TODO espacialy for > 1D Timeframes?
-        symbol = symbol.replace("RUSD", "USDT")
-        return exchange_delegate.fetch_ohlcv(symbol, timeframe, since, limit, params)
+    def fetch_ohlcv(self, symbol: str, timeframe: str = '1m', since: int = None, limit: int = None,
+                          params: dict = {}):
+        use_proxy = self.safe_bool(self.options, "proxy_ohlcv", False)
+        if use_proxy:
+            exchange_delegate = ccxt.binance()  # TODO espacialy for > 1D Timeframes?
+            symbol = symbol.replace("RUSD", "USDT")
+            return exchange_delegate.fetch_ohlcv(symbol, timeframe, since, limit, params)
+
+        reya_symbol = self.convertSymbolToReyaNotation(symbol)
+        current_time = int(time.time() * 1000)
+        #resolution = self._convertTimeframe(timeframe)
+
+        candles = run_async(self.client.markets.get_candles(
+            symbol=reya_symbol, resolution=timeframe, end_time=current_time
+        ))
+
+        market_summary = run_async(self.client.markets.get_market_summary(symbol=reya_symbol))
+        # Get 24h volume in USD: volume24h (tokens) * approximate average price over 24h
+        volume24h_tokens = float(market_summary.volume24h) if market_summary and market_summary.volume24h else 0.0
+        oracle_price = float(
+            market_summary.throttled_oracle_price) if market_summary and market_summary.throttled_oracle_price else 0.0
+        px_change24h = float(market_summary.px_change24h) if market_summary and market_summary.px_change24h else 0.0
+
+        # Approximate average price: if X% move happened, current price is end price
+        # start price = oracle_price / (1 + px_change24h/100)
+        # average = midpoint of start and end
+        if px_change24h != 0:
+            start_price = oracle_price / (1 + px_change24h / 100)
+            avg_price = (start_price + oracle_price) / 2
+        else:
+            avg_price = oracle_price
+
+        volume24h_usd = volume24h_tokens * avg_price
+        print(volume24h_usd)
+
+        return self._parseOhlcv(candles, volume24h_usd)
+
+    def _convertTimeframe(self, timeframe: str) -> str:
+        """Convert ccxt timeframe to Reya resolution"""
+        timeframe_map = {
+            '1m': '1',
+            '3m': '3',
+            '5m': '5',
+            '15m': '15',
+            '30m': '30',
+            '1h': '60',
+            '2h': '120',
+            '4h': '240',
+            '6h': '360',
+            '12h': '720',
+            '1d': 'D',
+            '1w': 'W',
+        }
+        if timeframe not in timeframe_map:
+            raise NotSupported(f"Timeframe {timeframe} not supported. Supported: {list(timeframe_map.keys())}")
+        return timeframe_map[timeframe]
+
+    def _parseOhlcv(self, response, volume24h: float = 0.0) -> list:
+        if response is None:
+            return []
+
+        if hasattr(response, 't'):
+            timestamps = response.t
+            opens = response.o
+            highs = response.h
+            lows = response.l
+            closes = response.c
+        elif isinstance(response, dict):
+            timestamps = response.get('t', [])
+            opens = response.get('o', [])
+            highs = response.get('h', [])
+            lows = response.get('l', [])
+            closes = response.get('c', [])
+        else:
+            return []
+
+        n = len(timestamps)
+        # Distribute 24h volume evenly across candles as approximation
+        volume_per_candle = volume24h / n if n > 0 else 0.0
+
+        ohlcv = []
+        for i in range(n):
+            ohlcv.append([
+                int(timestamps[i]) * 1000,
+                float(opens[i]),
+                float(highs[i]),
+                float(lows[i]),
+                float(closes[i]),
+                volume_per_candle,
+            ])
+
+        ohlcv.sort(key=lambda x: x[0])
+        return ohlcv
 
     # TODO
     # def fetch_ohlcv(self, symbol: str, timeframe='1m', since: Int = None, limit: Int = None, params={}) -> List[list]:
