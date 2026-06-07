@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import time
 from datetime import datetime
@@ -366,6 +367,20 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
     K_PREFIX_TOKENS = {'kPEPE', 'kBONK', 'kFLOKI', 'kSHIB', 'kDOGE', 'kNEIRO'}
 
+    # Assets accepted as margin collateral besides plain RUSD.
+    # realBalance from the accountBalances endpoint is denominated in each asset's own
+    # token units, so non-USD assets must be priced via their perp ticker.
+    #   haircut: fraction of USD value deducted before counting towards margin
+    #   ticker:  collateral oracle symbol (<ASSET>RUSD) used to price the asset in USD
+    #            (None => valued 1:1 with USD)
+    COLLATERAL_HAIRCUTS = {
+        "RUSD": {"haircut": 0.0, "ticker": None},
+        "SRUSD": {"haircut": 0.10, "ticker": None},  # staked RUSD, valued ~1:1 in USD
+        "ETH": {"haircut": 0.10, "ticker": "WETHRUSD"},  # accountBalances reports plain "ETH"
+        "WETH": {"haircut": 0.10, "ticker": "WETHRUSD"},  # alias, forward-compat
+        "WSTETH": {"haircut": 0.15, "ticker": "WSTETHRUSD"},
+    }
+
     def _getSymbol(self, perp_name):
         symbol = perp_name.replace('RUSDPERP', '')
         # Restore lowercase 'k' prefix (e.g. KPEPE -> kPEPE)
@@ -618,17 +633,44 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         ohlcv.sort(key=lambda x: x[0])
         return ohlcv
 
+    def _getCollateralPriceUsd(self, ticker: str) -> float:
+        """USD oracle price for a collateral asset, looked up by its perp ticker."""
+        raw = self.public_get_api_trading_prices({"symbol": ticker})
+        price = self.safe_float(raw, 'oraclePrice')
+        if price is None:
+            price = self.safe_float(raw, 'poolPrice')
+        if price is None:
+            price = self.safe_float(raw, 'price')
+        return float(price) if price else 0.0
+
     def fetch_balance(self, params: Optional[Dict] = None) -> Dict[str, Any]:
         request = {"wallet_address": self.walletAddress}
         balances = self.public_get_api_accounts_balance(self.extend(request, params or {}))
-        # Try SRUSD first TODO ETH Value? Multi Accounts?
-        balance = 0
+        # TODO use https://api.reya.xyz/api/accounts/{wallet} and skip manual calcs
+        # realBalance is denominated in each asset's own token units. RUSD counts 1:1,
+        # other accepted collateral (staked RUSD, wETH, ...) is converted to USD and
+        # reduced by its haircut before counting towards margin.
+        balance = 0.0
         for entry in balances:
-            if entry["asset"] == "SRUSD":
-                balance += float(entry["realBalance"]) * 0.9 #staked only 90%, 10% haircut TODO
-        for entry in balances:
-            if entry["asset"] == "RUSD":
-                balance += float(entry["realBalance"])
+            asset = entry.get("asset")
+            config = self.COLLATERAL_HAIRCUTS.get(asset)
+            if config is None:
+                continue  # asset not accepted as margin collateral
+            realBalance = float(entry.get("realBalance", 0) or 0)
+            if realBalance == 0:
+                continue
+            priceUsd = 1.0
+            if config["ticker"] is not None:
+                priceUsd = self._getCollateralPriceUsd(config["ticker"])
+            usdValue = realBalance * priceUsd * (1 - config["haircut"])
+            balance += usdValue
+            logging.debug("💰 collateral counted\n"
+                          "asset: %s\n"
+                          "realBalance: %s\n"
+                          "priceUsd: %s\n"
+                          "haircut: %s\n"
+                          "usdValue: %s",
+                          asset, realBalance, priceUsd, config["haircut"], usdValue)
 
         # raw expected to be list of balances
         # calc used since api didnt support it
@@ -642,7 +684,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             used += value
 
         bal = {"RUSD": {}}
-        # only knows RUSD for Trading
+        # margin is denominated in RUSD/USD across all collateral types
         bal["RUSD"]['free'] = balance - used
         bal["RUSD"]['total'] = balance
         bal["RUSD"]['used'] = used
