@@ -2,7 +2,7 @@ from enum import Enum
 
 
 class EOrderSide(str, Enum):
-    BUY = "buy",
+    BUY = "buy"
     SELL = "sell"
 
     @classmethod
@@ -18,7 +18,7 @@ class EOrderSide(str, Enum):
 
 
 class EOrderStatus(str, Enum):
-    CLOSED = "closed",
+    CLOSED = "closed"
     PARTIALLY_FILLED = "partially-filled"
     FILLED = "filled"
     REJECTED = "rejected"
@@ -40,6 +40,10 @@ class EOrderStatus(str, Enum):
 class EOrderType(str, Enum):
     MARKET = "market"
     LIMIT = "limit"
+    # Protective trigger orders. Values match the hyphenated ccxt strings the
+    # live engine's adoption matcher keys off (_is_reduce_only).
+    STOP_LOSS = "stop-loss"
+    TAKE_PROFIT = "take-profit"
 
     @classmethod
     def valueOf(cls, value):

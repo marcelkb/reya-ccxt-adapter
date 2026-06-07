@@ -326,10 +326,32 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         else:
             #Value A = Ask/Sell
             side = EOrderSide.SELL.value
-        if "orderType" in raw and raw.get("orderType") == "LIMIT":
+        # Map the protective trigger kinds (orderType "TP"/"SL") to the
+        # hyphenated ccxt types the engine's adoption matcher recognises.
+        # Collapsing them to "market" (the old behaviour) hid every resting
+        # SL/TP from _is_reduce_only / _extract_trigger_price, so the bot
+        # treated them as missing and re-placed every cycle.
+        ot = (raw.get("orderType") or "").upper()
+        if ot == "LIMIT":
             type = EOrderType.LIMIT.value
+        elif ot in ("TP", "TAKE_PROFIT", "TAKE-PROFIT"):
+            type = EOrderType.TAKE_PROFIT.value
+        elif ot in ("SL", "STOP_LOSS", "STOP-LOSS"):
+            type = EOrderType.STOP_LOSS.value
         else:
             type = EOrderType.MARKET.value
+
+        # Diagnostic: surface the raw orderType for every non-plain-limit order
+        # so the live feed can be checked against the TP/SL → ccxt-type mapping
+        # above (e.g. if Reya ever sends "STOP_LOSS" instead of "SL").
+        if ot not in ("", "LIMIT"):
+            logging.debug("🔎 Reya parse_order trigger mapping\n"
+                          "raw orderType: %r\n"
+                          "mapped type: %r\n"
+                          "triggerPx: %s\n"
+                          "reduceOnly: %s",
+                          raw.get("orderType"), type,
+                          raw.get("triggerPx"), raw.get("reduceOnly"))
 
         symbol = self.safe_string_2(raw, 'symbol', 'ticker')
         symbol = self.convertSymbolToCcxtNotation(symbol)
@@ -345,6 +367,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             "symbol": symbol,
             "type": type,
             "side": side,
+            # Expose the trigger so the engine can match a resting SL/TP to
+            # its tracked position. Reya's reduceOnly comes back False even on
+            # SL/TP, so the engine keys off type — but surface it anyway.
+            "triggerPrice": self.safe_value(raw, 'triggerPx'),
+            "stopLossPrice": self.safe_value(raw, 'triggerPx') if type == EOrderType.STOP_LOSS.value else None,
+            "takeProfitPrice": self.safe_value(raw, 'triggerPx') if type == EOrderType.TAKE_PROFIT.value else None,
+            "reduceOnly": self.safe_value(raw, 'reduceOnly', False),
             "price": self.safe_value_2(raw, 'limitPx', 'triggerPx'),
             "amount": self.safe_value(raw, 'qty', 0),
             "filled": self.safe_value(raw, 'execQty', 0),
@@ -1129,7 +1158,18 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         if account_id is None:
             raise RuntimeError("create_order requires accountId either in params or options['account_id']")
 
-        reduceOnly = False
+        # reduceOnly is only valid on IOC orders here. Reya rejects it on GTC
+        # limits TWICE over: the SDK raises "Unexpected True value for parameter
+        # reduce_only for GTC orders" if it's True, and the SERVER 400s with
+        # "reduceOnly field is only supported for perp IOC orders" if the field
+        # is sent AT ALL — even reduceOnly=false. CreateOrderRequest.to_dict()
+        # uses exclude_none=True, so passing reduce_only=None (NOT False) drops
+        # the field from the wire entirely and the GTC limit is accepted. So a
+        # resting GTC limit is ALWAYS placed non-reduce-only with the field
+        # omitted; only the IOC/market branch below honours the flag (→
+        # reduce-only market close). Reya's close-only resting protection is the
+        # native TP/SL triggers, not limits.
+        reduceOnly = bool(params.get('reduceOnly', params.get('reduce_only', False)))
         symbol = self.convertSymbolToReyaNotation(symbol)
 
         if type == EOrderType.LIMIT.value:
@@ -1140,6 +1180,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 limit_px=str(price) if price is not None else None,
                 qty=str(amount),
                 time_in_force=time_in_force,
+                reduce_only=None,  # None → field omitted from wire (server 400s on any reduceOnly for GTC)
                 expires_after=params.get('expires_after')
             )
         else:
