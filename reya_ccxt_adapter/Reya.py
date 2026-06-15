@@ -58,6 +58,26 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _parse_ts_ms(ts) -> int:
+    """Coerce a Reya timestamp to epoch-ms. Accepts an epoch-ms int/float, a
+    numeric string, or an ISO8601 string ("...Z"). Falls back to now on
+    anything unparseable so a malformed fill never crashes the close path."""
+    if ts is None:
+        return _now_ms()
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    s = str(ts).strip()
+    if not s:
+        return _now_ms()
+    if s.isdigit():
+        return int(s)
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        return _now_ms()
+
+
 def run_async(coro):
     try:
         loop = asyncio.get_event_loop()
@@ -288,14 +308,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     #     }
 
     def parse_trade(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        ts = self.safe_string(raw, 'timestamp')
-        if ts is None:
-            ts = _now_ms()
-        else:
-            # Parse ISO8601 (the "Z" means UTC)
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            # Milliseconds since epoch
-            ts = int(dt.timestamp() * 1000)
+        # perpExecutions stamps the fill under any of these keys, as either an
+        # ISO8601 string OR an epoch-ms integer — the old code assumed an ISO
+        # string and crashed on the numeric form (e.g. createdAt 1747927089946).
+        ts_raw = (raw.get('timestamp') or raw.get('createdAt')
+                  or raw.get('created_at') or raw.get('executedAt')
+                  or raw.get('timestamp_ms'))
+        ts = _parse_ts_ms(ts_raw)
 
         side = None
         if "side" in raw and raw.get("side") == "B":
@@ -307,14 +326,21 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
         price = self.safe_number(raw, 'price')
 
+        fee = None
+        fee_cost = self.safe_number_2(raw, 'fee', 'feePaid')
+        if fee_cost is not None:
+            fee = {"cost": abs(fee_cost), "currency": "RUSD"}
+
         return {
             "id": self.safe_string_2(raw, 'trade_id', 'id'),
+            "order": self.safe_string_2(raw, 'order_id', 'orderId'),
             "timestamp": ts,
             "datetime": self.iso8601(ts),
             "symbol": self.safe_string_2(raw, 'symbol', 'ticker'),
             "price": price,
             "amount": amount,
             "side": side,
+            "fee": fee,
             "info": raw,
             "status": EOrderStatus.CLOSED.value
         }
@@ -679,7 +705,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         # realBalance is denominated in each asset's own token units. RUSD counts 1:1,
         # other accepted collateral (staked RUSD, wETH, ...) is converted to USD and
         # reduced by its haircut before counting towards margin.
-        balance = 0.0
+        balance = 0.
         for entry in balances:
             asset = entry.get("asset")
             config = self.COLLATERAL_HAIRCUTS.get(asset)
@@ -701,16 +727,79 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                           "usdValue: %s",
                           asset, realBalance, priceUsd, config["haircut"], usdValue)
 
-        # raw expected to be list of balances
-        # calc used since api didnt support it
+        # Reya's API exposes no "used margin" field, so reconstruct it the way
+        # the venue's own margin engine does. Two sources lock initial margin:
+        #   1) open POSITIONS — IM = |notional| / leverage
+        #   2) resting orders, but ONLY when they INCREASE exposure. An
+        #      opposing-side limit up to the open position's size is a
+        #      partial-TP / exit: filling it shrinks the position, so it locks
+        #      NO initial margin (the venue reserves nothing for it either).
+        # The old code summed amount*price/lev over EVERY resting order and
+        # ignored position margin entirely, so an open long with a resting
+        # partial-TP limit (which Reya can't tag reduce_only on a GTC limit —
+        # see create_order) double-charged free margin down to ~0 and blocked
+        # new entries. Inferring reduce-vs-increase from the net position fixes
+        # both: it adds the missing position IM and drops the phantom TP reserve.
         openOrders = self.fetch_open_orders()
         levs = self.fetch_leverages()
-        used = 0
+
+        # Signed net size per symbol (+long / -short), and the IM those
+        # positions already lock.
+        positionSizes: Dict[str, float] = {}
+        used = 0.0
+        try:
+            for pos in self.fetch_positions():
+                sym = pos.get("symbol")
+                if sym is None:
+                    continue
+                try:
+                    size = float(pos.get("contracts") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if size == 0:
+                    continue
+                positionSizes[sym] = size
+                # Prefer the config leverage map (what the venue and bot
+                # actually use). The position dict's own `leverage` is the
+                # wrapper's default 3 — Reya's per-wallet leverages endpoint is
+                # gone (404), so fetch_leverage can't read the real value, and
+                # notional/3 instead of notional/10 over-reserves free into the
+                # negative.
+                lev = float(levs.get(sym) or pos.get("leverage") or 3)
+                notional = pos.get("notional")
+                try:
+                    if notional in (None, 0):
+                        entry = float(pos.get("entryPrice") or pos.get("markPrice") or 0)
+                        notional = abs(size) * entry
+                    used += abs(float(notional)) / (lev if lev > 0 else 3)
+                except (TypeError, ValueError):
+                    continue
+        except Exception as e:
+            logging.warning("⚠️ Reya fetch_positions failed in fetch_balance "
+                            "(%s) — free will omit open-position margin.", e)
+
         for openOrder in openOrders:
-            amount = float(openOrder['amount'])
-            price = float(openOrder['price'])
-            value = (amount * price) / float(levs.get(openOrder['symbol'], 3))
-            used += value
+            try:
+                amount = float(openOrder['amount'] or 0)
+                price = float(openOrder['price'] or 0)
+            except (TypeError, ValueError):
+                continue
+            if amount <= 0 or price <= 0:
+                continue
+            sym = openOrder.get('symbol')
+            side = str(openOrder.get('side') or '').lower()
+            net = positionSizes.get(sym, 0.0)
+            # Portion of this order that actually grows exposure. An opposing
+            # order is an exit up to |net|; only the excess beyond the position
+            # would open new risk (the bot never reverses, so this is ~0).
+            increasing = amount
+            if net > 0 and side == 'sell':
+                increasing = max(0.0, amount - net)
+            elif net < 0 and side == 'buy':
+                increasing = max(0.0, amount - abs(net))
+            if increasing <= 0:
+                continue
+            used += (increasing * price) / float(levs.get(sym, 3) or 3)
 
         bal = {"RUSD": {}}
         # margin is denominated in RUSD/USD across all collateral types
@@ -1367,24 +1456,46 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         #TODO start end time filtering
         params = params or {}
 
+        # Reya's EXECUTIONS (fills) live on the perpExecutions endpoint, NOT
+        # openOrders. The old code queried public_get_open_orders here, so once
+        # a position closed there were no resting orders and this returned
+        # nothing — the consuming bot then fell back to planned SL/TP levels and
+        # mis-stated realised PnL (a +3.10 ETH short was booked as a −5.21
+        # stop-out). public_get_trades → v2/wallet/{wallet_address}/perpExecutions
+        # returns the actual fills (price/qty/side) needed to price a close.
         request = {"wallet_address": self.walletAddress}
-        items = self.public_get_open_orders(self.extend(request, params or {}))
+        items = self.public_get_trades(self.extend(request, params or {})) or []
 
-        # Filter by symbol if provided
+        # Filter by symbol if provided. perpExecutions items may carry the venue
+        # market id and/or the Reya-notation symbol, so match on either.
         if symbol is not None:
             market = self.markets.get(symbol)
             if market is None:
                 raise ccxt.ExchangeError(f"{self.id} fetch_my_trades symbol {symbol} not found in markets")
             market_id = market.get('id') or market.get('market_id') or None
+            reya_symbol = self.convertSymbolToReyaNotation(symbol)
             filtered = []
             for t in items:
                 trade_market_id = t.get('market_id') or t.get('marketId') or None
-                if trade_market_id is not None and str(trade_market_id) == str(market_id):
+                trade_symbol = t.get('symbol') or t.get('ticker') or None
+                match_id = (market_id is not None and trade_market_id is not None
+                            and str(trade_market_id) == str(market_id))
+                match_sym = (trade_symbol is not None
+                             and str(trade_symbol) == str(reya_symbol))
+                if match_id or match_sym:
                     t['symbol'] = symbol
                     filtered.append(t)
             items = filtered
 
-        return [self.parse_trade(t) for t in items]
+        trades = [self.parse_trade(t) for t in items]
+        # since/limit on the PARSED timestamp (int ms) — the raw field may be an
+        # ISO8601 string, which wouldn't compare against the ms `since`.
+        if since is not None:
+            trades = [t for t in trades if (t.get('timestamp') or 0) >= since]
+        trades.sort(key=lambda x: x.get('timestamp') or 0)
+        if limit is not None:
+            trades = trades[-limit:]
+        return trades
 
     def fetch_trades(self, symbol: str, since: Optional[int] = None, limit: Optional[int] = None,
                      params: Optional[Dict] = None) -> List[Dict]:
@@ -1398,17 +1509,18 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             raise ccxt.ExchangeError(f"{self.id} fetch_trades could not find market id for symbol {symbol}")
 
         request = {"wallet_address": self.walletAddress}
-        items = self.public_get_open_orders(self.extend(request, params or {}))
-
-        # Apply since and limit client-side if needed:
-        if since is not None:
-            items = [t for t in items if t.get('timestamp', 0) >= since]
-        if limit is not None:
-            items = items[:limit]
+        items = self.public_get_trades(self.extend(request, params or {})) or []
 
         for i in items:
             i['symbol'] = symbol
-        return [self.parse_trade(t) for t in items]
+        trades = [self.parse_trade(t) for t in items]
+        # Apply since and limit client-side on the PARSED ms timestamp.
+        if since is not None:
+            trades = [t for t in trades if (t.get('timestamp') or 0) >= since]
+        trades.sort(key=lambda x: x.get('timestamp') or 0)
+        if limit is not None:
+            trades = trades[-limit:]
+        return trades
 
     # deposit / withdraw (wallet endpoints)
     def fetch_deposit_address(self, code: str, params: Optional[Dict] = None) -> Dict[str, Any]:
