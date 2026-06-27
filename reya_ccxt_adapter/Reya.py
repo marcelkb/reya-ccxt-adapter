@@ -698,6 +698,35 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             price = self.safe_float(raw, 'price')
         return float(price) if price else 0.0
 
+    def _initial_margin_rate(self, symbol: str) -> float:
+        """Venue initial-margin RATE for a market: IM = |notional| × rate.
+
+        Reya publishes this per market as `initialMarginParameter` in the market
+        definition (e.g. BTC 0.04 ⇒ 25x). This is the venue's ACTUAL margin
+        requirement and needs no /leverages call. The old code used
+        |notional| / leverage with leverage read from the /leverages endpoint —
+        which 404s for default-leverage accounts and fell back to 3x, reserving
+        ~7x too much margin (a 15k-notional book on a 4.4k account computed used
+        5037 ⇒ free −750, when the real IM is ~670 ⇒ free ~3700). Falls back to
+        1/maxLeverage, then a conservative 0.05 (20x), if the field is absent."""
+        try:
+            info = self.market(symbol).get('info', {}) or {}
+        except Exception:
+            info = {}
+        try:
+            rate = float(info.get('initialMarginParameter'))
+            if rate > 0:
+                return rate
+        except (TypeError, ValueError):
+            pass
+        try:
+            maxlev = float(info.get('maxLeverage') or 0)
+            if maxlev > 0:
+                return 1.0 / maxlev
+        except (TypeError, ValueError):
+            pass
+        return 0.05  # 20x — conservative default if the market def lacks both
+
     def fetch_balance(self, params: Optional[Dict] = None) -> Dict[str, Any]:
         request = {"wallet_address": self.walletAddress}
         balances = self.public_get_api_accounts_balance(self.extend(request, params or {}))
@@ -729,24 +758,27 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
         # Reya's API exposes no "used margin" field, so reconstruct it the way
         # the venue's own margin engine does. Two sources lock initial margin:
-        #   1) open POSITIONS — IM = |notional| / leverage
+        #   1) open POSITIONS — IM = |notional| × initialMarginParameter
         #   2) resting orders, but ONLY when they INCREASE exposure. An
         #      opposing-side limit up to the open position's size is a
         #      partial-TP / exit: filling it shrinks the position, so it locks
         #      NO initial margin (the venue reserves nothing for it either).
-        # The old code summed amount*price/lev over EVERY resting order and
-        # ignored position margin entirely, so an open long with a resting
-        # partial-TP limit (which Reya can't tag reduce_only on a GTC limit —
-        # see create_order) double-charged free margin down to ~0 and blocked
-        # new entries. Inferring reduce-vs-increase from the net position fixes
-        # both: it adds the missing position IM and drops the phantom TP reserve.
+        # IM uses the venue's per-market `initialMarginParameter` (see
+        # _initial_margin_rate) — NOT notional/leverage. The /leverages endpoint
+        # 404s for default accounts and the 3x fallback over-reserved free into
+        # the negative; the IM parameter is the venue's real requirement.
         openOrders = self.fetch_open_orders()
-        levs = self.fetch_leverages()
 
         # Signed net size per symbol (+long / -short), and the IM those
         # positions already lock.
         positionSizes: Dict[str, float] = {}
         used = 0.0
+        # Open-position unrealised PnL. realBalance is SETTLED collateral only —
+        # it excludes the mark-to-market on open positions. The venue's "Perp
+        # Equity" = collateral + uPnL, so equity must add it (a −2000 open loss
+        # made the bot read equity ~2000 too high, e.g. exchange 2344 vs bot
+        # 4391). ccxt's safe_position normalises the key to `unrealizedPnl`.
+        unrealizedPnl = 0.0
         try:
             for pos in self.fetch_positions():
                 sym = pos.get("symbol")
@@ -759,19 +791,20 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 if size == 0:
                     continue
                 positionSizes[sym] = size
-                # Prefer the config leverage map (what the venue and bot
-                # actually use). The position dict's own `leverage` is the
-                # wrapper's default 3 — Reya's per-wallet leverages endpoint is
-                # gone (404), so fetch_leverage can't read the real value, and
-                # notional/3 instead of notional/10 over-reserves free into the
-                # negative.
-                lev = float(levs.get(sym) or pos.get("leverage") or 3)
+                try:
+                    upnl = pos.get("unrealizedPnl")
+                    if upnl is None:
+                        upnl = pos.get("unrealisedPnl")
+                    if upnl is not None:
+                        unrealizedPnl += float(upnl)
+                except (TypeError, ValueError):
+                    pass
                 notional = pos.get("notional")
                 try:
                     if notional in (None, 0):
                         entry = float(pos.get("entryPrice") or pos.get("markPrice") or 0)
                         notional = abs(size) * entry
-                    used += abs(float(notional)) / (lev if lev > 0 else 3)
+                    used += abs(float(notional)) * self._initial_margin_rate(sym)
                 except (TypeError, ValueError):
                     continue
         except Exception as e:
@@ -799,13 +832,25 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 increasing = max(0.0, amount - abs(net))
             if increasing <= 0:
                 continue
-            used += (increasing * price) / float(levs.get(sym, 3) or 3)
+            used += increasing * price * self._initial_margin_rate(sym)
 
+        # Equity (Perp Equity) = settled collateral + open-position uPnL. Free
+        # (Available) = equity − initial margin reserved. This mirrors the
+        # exchange UI; without uPnL the bot over-sized against a paper profit
+        # and under-protected against a paper loss.
+        equity = balance + unrealizedPnl
         bal = {"RUSD": {}}
         # margin is denominated in RUSD/USD across all collateral types
-        bal["RUSD"]['free'] = balance - used
-        bal["RUSD"]['total'] = balance
+        bal["RUSD"]['free'] = equity - used
+        bal["RUSD"]['total'] = equity
         bal["RUSD"]['used'] = used
+        logging.debug("💰 Reya equity reconstructed\n"
+                      "collateral: %.2f\n"
+                      "unrealizedPnl: %.2f\n"
+                      "equity(total): %.2f\n"
+                      "used(IM): %.2f\n"
+                      "free: %.2f",
+                      balance, unrealizedPnl, equity, used, equity - used)
         return bal
 
     # OLD
@@ -853,12 +898,30 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
     lev_map = {}
 
+    def _safe_get_leverages(self, params={}) -> List[Dict]:
+        """Raw per-market leverage list, or [] when the endpoint is unavailable.
+
+        Reya's `api/trading/wallet/{wallet}/leverages` 404s for any account that
+        has never explicitly set a leverage (a fresh/default account just uses
+        the venue default). The old code let that 404 propagate, which crashed
+        fetch_balance / fetch_position entirely — so a single default-leverage
+        account took down balance + position reads. Degrade to [] → callers fall
+        back to DEFAULT_LEVERAGE."""
+        request = {"wallet_address": self.walletAddress}
+        try:
+            return self.public_get_leverages(self.extend(request, params or {})) or []
+        except Exception as e:
+            logging.debug("ℹ️ Reya leverages endpoint unavailable (%s) — "
+                          "defaulting to %sx.", e, self.DEFAULT_LEVERAGE)
+            return []
+
+    DEFAULT_LEVERAGE = 3
+
     def fetch_leverage(self, symbol: str, params={}):
         # [
         #     {"accountId":"","marketId":"2","leverage":3,"createdAt":"2025-08-15T21:38:17.822Z","updatedAt":"2025-08-15T21:38:17.822Z"}
         # ]
-        request = {"wallet_address": self.walletAddress}
-        levs = self.public_get_leverages(self.extend(request, params or {}))
+        levs = self._safe_get_leverages(params)
         if self.lev_map == {}:
             self.lev_map = {lev['marketId']: int(lev['leverage']) for lev in levs}
 
@@ -869,14 +932,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 raise ccxt.ExchangeError(f"{self.id} fetch_leverage symbol {symbol} not found in markets")
             market_id = market.get('id') or market.get('market_id')
 
-        return self.lev_map.get(market_id, 3)  # Default = 3
+        return self.lev_map.get(market_id, self.DEFAULT_LEVERAGE)
 
     def fetch_leverages(self, symbols: Strings = None, params={}):
         # [
         #     {"accountId":"","marketId":"2","leverage":3,"createdAt":"2025-08-15T21:38:17.822Z","updatedAt":"2025-08-15T21:38:17.822Z"}
         # ]
-        request = {"wallet_address": self.walletAddress}
-        levs = self.public_get_leverages(self.extend(request, params or {}))
+        levs = self._safe_get_leverages(params)
         lev_map_by_id = {lev["marketId"]: int(lev["leverage"]) for lev in levs}
 
         symbol_lev_map = {}
@@ -1460,11 +1522,16 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         # openOrders. The old code queried public_get_open_orders here, so once
         # a position closed there were no resting orders and this returned
         # nothing — the consuming bot then fell back to planned SL/TP levels and
-        # mis-stated realised PnL (a +3.10 ETH short was booked as a −5.21
-        # stop-out). public_get_trades → v2/wallet/{wallet_address}/perpExecutions
-        # returns the actual fills (price/qty/side) needed to price a close.
+        # mis-stated realised PnL. public_get_trades →
+        # v2/wallet/{wallet_address}/perpExecutions returns the actual fills
+        # (price/qty/side) needed to price an entry or a close. The response is
+        # wrapped as {"data": [...], "meta": {...}} — unwrap to the fills list.
         request = {"wallet_address": self.walletAddress}
-        items = self.public_get_trades(self.extend(request, params or {})) or []
+        resp = self.public_get_trades(self.extend(request, params or {}))
+        if isinstance(resp, dict):
+            items = resp.get("data") or resp.get("trades") or []
+        else:
+            items = resp or []
 
         # Filter by symbol if provided. perpExecutions items may carry the venue
         # market id and/or the Reya-notation symbol, so match on either.
