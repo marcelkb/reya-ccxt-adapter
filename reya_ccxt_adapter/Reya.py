@@ -594,6 +594,12 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     def fetch_order_book(self, symbol: str, limit: Optional[int] = 100, params: Optional[Dict] = None) -> Dict[str, Any]:
         raise NotImplementedError
 
+    # Resolutions the venue accepts (v2/candleHistory rejects anything else).
+    REYA_RESOLUTIONS = ('1m', '5m', '15m', '30m', '1h', '4h', '1d')
+    # The endpoint returns a FIXED page of this many bars ending at endTime;
+    # startTime/countBack are ignored, so pagination walks endTime backwards.
+    REYA_CANDLE_PAGE = 200
+
     def fetch_ohlcv(self, symbol: str, timeframe: str = '1m', since: int = None, limit: int = None,
                           params: dict = {}):
         use_proxy = self.safe_bool(self.options, "proxy_ohlcv", False)
@@ -602,34 +608,59 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             symbol = symbol.replace("RUSD", "USDT")
             return exchange_delegate.fetch_ohlcv(symbol, timeframe, since, limit, params)
 
+        if timeframe not in self.REYA_RESOLUTIONS:
+            raise NotSupported(f"Timeframe {timeframe} not supported by Reya candleHistory. "
+                               f"Supported: {list(self.REYA_RESOLUTIONS)}")
+
         reya_symbol = self.convertSymbolToReyaNotation(symbol)
-        current_time = int(time.time() * 1000)
-        #resolution = self._convertTimeframe(timeframe)
+        tf_ms = self.parse_timeframe(timeframe) * 1000
+        now_ms = int(time.time() * 1000)
+        if limit is None:
+            if since is not None:
+                limit = int((now_ms - since) // tf_ms) + 2
+            else:
+                limit = self.REYA_CANDLE_PAGE
 
-        candles = run_async(self.client.markets.get_candles(
-            symbol=reya_symbol, resolution=timeframe, end_time=current_time
-        ))
-
-        market_summary = run_async(self.client.markets.get_market_summary(symbol=reya_symbol))
-        # Get 24h volume in USD: volume24h (tokens) * approximate average price over 24h
-        volume24h_tokens = float(market_summary.volume24h) if market_summary and market_summary.volume24h else 0.0
-        oracle_price = float(
-            market_summary.throttled_oracle_price) if market_summary and market_summary.throttled_oracle_price else 0.0
-        px_change24h = float(market_summary.px_change24h) if market_summary and market_summary.px_change24h else 0.0
-
-        # Approximate average price: if X% move happened, current price is end price
-        # start price = oracle_price / (1 + px_change24h/100)
-        # average = midpoint of start and end
-        if px_change24h != 0:
-            start_price = oracle_price / (1 + px_change24h / 100)
-            avg_price = (start_price + oracle_price) / 2
+        # Venue candles carry no volume (0.0); the old market-summary volume
+        # estimate cost an extra request per fetch and smeared a fake 24h
+        # figure across every bar, so it was dropped.
+        rows = {}
+        end_time = self.safe_integer(params, 'endTime', now_ms)
+        # Page budget: with `since` we must walk all the way back to it even if
+        # `limit` is small (limit means "first N bars after since" in ccxt).
+        if since is not None:
+            bars_back = int((end_time - since) // tf_ms) + 2
         else:
-            avg_price = oracle_price
+            bars_back = limit
+        max_pages = (bars_back // self.REYA_CANDLE_PAGE) + 3
+        for _ in range(max_pages):
+            page = self.publicGetHistoricalCandles({
+                'symbol': reya_symbol,
+                'resolution': timeframe,
+                'endTime': end_time,
+            })
+            parsed = self._parseOhlcv(page)
+            if not parsed:
+                break
+            for row in parsed:
+                rows[row[0]] = row
+            oldest = parsed[0][0]
+            if since is not None and oldest <= since:
+                break
+            if since is None and len(rows) >= limit:
+                break
+            if len(parsed) < self.REYA_CANDLE_PAGE:
+                break  # venue history exhausted
+            new_end = oldest - 1
+            if new_end >= end_time:
+                break
+            end_time = new_end
 
-        volume24h_usd = volume24h_tokens * avg_price
-        print(volume24h_usd)
-
-        return self._parseOhlcv(candles, volume24h_usd)
+        out = sorted(rows.values(), key=lambda r: r[0])
+        if since is not None:
+            out = [r for r in out if r[0] >= since]
+            return out[:limit]
+        return out[-limit:]
 
     def _convertTimeframe(self, timeframe: str) -> str:
         """Convert ccxt timeframe to Reya resolution"""
