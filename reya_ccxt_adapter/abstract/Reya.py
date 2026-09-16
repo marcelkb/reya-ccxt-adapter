@@ -3,9 +3,10 @@ from ccxt.base.types import Entry
 
 class ImplicitAPI:
     # Public GET endpoints
-    public_get_api_markets = publicGetApiMarkets = Entry('v2/marketDefinitions', 'public', 'GET', {'cost': 1})
+    public_get_api_markets = publicGetApiMarkets = Entry('v2/perpMarketDefinitions', 'public', 'GET', {'cost': 1})
+    # v1 only: the v2 API removed /prices (use the summary's markPrice instead)
     public_get_api_trading_prices = publicGetApiTradingPrices = Entry('v2/prices/{symbol}', 'public', 'GET', {'cost': 1})
-    public_get_api_market_summary = publicGetApiMarketSummary = Entry('v2/market/{symbol}/summary', 'public', 'GET', {'cost': 1})
+    public_get_api_market_summary = publicGetApiMarketSummary = Entry('v2/perpMarket/{symbol}/summary', 'public', 'GET', {'cost': 1})
     public_get_historical_candles = publicGetHistoricalCandles = Entry('v2/candleHistory/{symbol}/{resolution}', 'public', 'GET', {'cost': 1})
     public_get_positions = publicGetPositions = Entry('v2/wallet/{wallet_address}/positions', 'public', 'GET', {'cost': 1})
     public_get_api_accounts_balance = publicGetApiAccountsBalance = Entry('v2/wallet/{wallet_address}/accountBalances', 'public',

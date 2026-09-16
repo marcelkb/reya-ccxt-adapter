@@ -8,9 +8,9 @@
 # - Only uses Reya SDK for private calls
 #
 # Endpoints mapped from Reya docs:
-# "v2/marketDefinitions"
-# "v2/market/{symbol}/summary"
-# "v2/prices/{symbol}"
+# "v2/perpMarketDefinitions"
+# "v2/perpMarket/{symbol}/summary"
+# "v2/prices/{symbol}" (v1 only)
 # "v2/wallet/{address}/accountBalances"
 # "candleHistory/{symbol}/{resolution}"
 # "wallet/{address}/positions"
@@ -149,8 +149,8 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 "public": {
                     "get": {
                         # markets & public data
-                        "v2/marketDefinitions": 1,
-                        "v2/market/{symbol}/summary": 1,
+                        "v2/perpMarketDefinitions": 1,
+                        "v2/perpMarket/{symbol}/summary": 1,
                         "v2/prices/{symbol}": 1,
                         "v2/wallet/{address}/accountBalances":1,
                         "candleHistory/{symbol}/{resolution}":1,
@@ -624,6 +624,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 markTokenTicker = base + "RUSDPERP"
 
         request = {"symbol": markTokenTicker}
+        if REYA_V2:
+            # v2 dropped /prices; the market summary carries the mark price
+            # (what triggers fire on) next to oracle and mid.
+            raw = self.public_get_api_market_summary(self.extend(request, params or {}))
+            parsed = self.parse_ticker(raw)
+            parsed["last"] = self.safe_float(raw, 'markPrice')
+            return parsed
         raw = self.public_get_api_trading_prices(self.extend(request, params or {}))
         parsed = self.parse_ticker(raw)
         return parsed
