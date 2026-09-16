@@ -139,6 +139,11 @@ def test_fetch_ticker_last_price():
         assert ticker["last"] == 60001.5  # pool price, unchanged v1 behaviour
 
 
+@pytest.mark.parametrize("raw,last", [({"price": "5"}, 5.0), ({}, None), ({"poolPrice": "7", "price": "5"}, 7.0)])
+def test_parse_ticker_last_falls_back_to_price(raw, last):
+    assert makeExchange().parse_ticker(raw)["last"] == last
+
+
 ORACLE_PRICES_V2 = [{"asset": "ETH", "oraclePrice": "2392.5", "updatedAt": 1},
                     {"asset": "wstETH", "oraclePrice": "2976.25", "updatedAt": 1},
                     {"asset": "SRUSD", "oraclePrice": "1.07", "updatedAt": 1}]

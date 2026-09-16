@@ -357,7 +357,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             "low": self.safe_float(raw, 'low'),
             "bid": self.safe_float(raw, 'best_bid'),
             "ask": self.safe_float(raw, 'best_ask'),
-            "last":self.safe_float(raw, 'poolPrice', 'price'),
+            "last":self.safe_float_2(raw, 'poolPrice', 'price'),
             "baseVolume": self.safe_float(raw, 'volume', 'last24hVolume'), #todo from other endpoint
             "info": raw,
         }
