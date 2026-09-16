@@ -346,3 +346,16 @@ def test_sdk_patch_keeps_installed_sdk_version():
     from sdk._version import SDK_VERSION
     import reya_ccxt_adapter.sdk_patch  # noqa: F401
     assert sys.modules["sdk._version"].SDK_VERSION == SDK_VERSION
+
+
+def test_run_async_creates_loop_without_deprecation_warning():
+    import subprocess
+    import sys
+    code = ("import asyncio; from reya_ccxt_adapter.Reya import run_async\n"
+            "async def one(): return 1\n"
+            "assert run_async(one()) + run_async(one()) == 2\n")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run([sys.executable, "-W", "error::DeprecationWarning", "-c", code], cwd=repo,
+                         env=dict(os.environ, PYTHONPATH=os.pathsep.join([repo, os.environ.get("PYTHONPATH", "")])),
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-2000:]

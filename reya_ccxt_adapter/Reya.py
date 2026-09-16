@@ -34,6 +34,7 @@ import logging
 import math
 import os
 import time
+import warnings
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from io import UnsupportedOperation
@@ -130,11 +131,17 @@ def tradingConfigFromEnv(walletAddress: Optional[str] = None, privateKey: Option
 
 def run_async(coro):
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        # no loop exists, create one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Reuse the thread's loop: aiohttp binds its connector to get_event_loop().
+        # Python 3.12+ warns when get_event_loop() has to create it, so create it here.
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", DeprecationWarning)
+                loop = asyncio.get_event_loop()
+        except (DeprecationWarning, RuntimeError):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
     if loop.is_running():
         # already inside an async loop → create a blocking task
