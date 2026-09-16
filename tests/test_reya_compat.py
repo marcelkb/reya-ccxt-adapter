@@ -1,8 +1,7 @@
 """Offline tests for the Reya adapter under both SDK lines.
 
-Run once with the v1 SDK (reya-python-sdk 2.2.x) and once with the v2 /
-perpOB SDK (3.5.x) installed; the adapter picks its protocol mode from the
-installed SDK. No test touches the network.
+Run once with REYA_API_VERSION=v1 and once with v2 (the docstring of
+test_sdk_loader.py says where each SDK comes from). No test touches the network.
 """
 import os
 
@@ -19,7 +18,8 @@ ACCOUNT_ID = 4242
 @pytest.fixture(autouse=True)
 def cleanEnv(monkeypatch):
     for name in ("CHAIN_ID", "REYA_API_URL", "OWNER_WALLET_ADDRESS", "PRIVATE_KEY", "ACCOUNT_ID",
-                 "PERP_WALLET_ADDRESS_1", "PERP_PRIVATE_KEY_1", "PERP_ACCOUNT_ID_1"):
+                 "PERP_WALLET_ADDRESS_1", "PERP_PRIVATE_KEY_1", "PERP_ACCOUNT_ID_1",
+                 "REYA_DEX_ID", "REYA_ORDERS_GATEWAY"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -49,6 +49,31 @@ def test_testnet_option_targets_devnet():
     else:
         assert cfg.api_url == "https://api-cronos.reya.xyz/v2"
     assert ex.urls["api"]["public"] + "/v2" == cfg.api_url
+
+
+def test_env_config_accepts_v1_names(monkeypatch):
+    monkeypatch.setenv("OWNER_WALLET_ADDRESS", WALLET)
+    monkeypatch.setenv("PRIVATE_KEY", DUMMY_KEY)
+    monkeypatch.setenv("ACCOUNT_ID", "7")
+    cfg = ReyaModule.tradingConfigFromEnv()
+    assert (cfg.owner_wallet_address, cfg.private_key, cfg.account_id) == (WALLET, DUMMY_KEY, 7)
+
+
+def test_env_config_accepts_v2_names(monkeypatch):
+    monkeypatch.setenv("PERP_WALLET_ADDRESS_1", WALLET)
+    monkeypatch.setenv("PERP_PRIVATE_KEY_1", DUMMY_KEY)
+    monkeypatch.setenv("PERP_ACCOUNT_ID_1", "8")
+    cfg = ReyaModule.tradingConfigFromEnv()
+    assert (cfg.owner_wallet_address, cfg.private_key, cfg.account_id) == (WALLET, DUMMY_KEY, 8)
+
+
+@pytest.mark.skipif(not ReyaModule.REYA_V2, reason="dex id and gateway exist only in the v2 SDK")
+def test_env_config_passes_v2_dex_and_gateway(monkeypatch):
+    monkeypatch.setenv("REYA_DEX_ID", "1")
+    monkeypatch.setenv("REYA_ORDERS_GATEWAY", "0x" + "cd" * 20)
+    cfg = makeExchange(sandbox=True).client.config
+    assert cfg.dex_id == 1
+    assert cfg.default_orders_gateway_address == "0x" + "cd" * 20
 
 
 MARKET_DEFS = [{"symbol": "BTCRUSDPERP", "marketId": 1, "minOrderQty": "0.001", "qtyStepSize": "0.001",

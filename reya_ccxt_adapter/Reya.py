@@ -44,15 +44,15 @@ from ccxt.base.types import Str, Int, FundingRate, OrderSide, Num, Strings
 
 from reya_ccxt_adapter.abstract.Reya import ImplicitAPI
 from reya_ccxt_adapter.const import EOrderSide, EOrderStatus, EOrderType
+# selects the SDK by REYA_API_VERSION; must run before the first `sdk` import
+from reya_ccxt_adapter.sdk_loader import API_VERSION
 from sdk.open_api import CreateOrderResponse, TimeInForce, CancelOrderResponse, OrderType, OrderStatus
 from sdk.reya_rest_api import ReyaTradingClient
 from sdk.reya_rest_api.config import REYA_DEX_ID, MAINNET_CHAIN_ID, TradingConfig
 from sdk.reya_rest_api.models import TriggerOrderParameters, LimitOrderParameters
 
-# Protocol mode follows the installed SDK: reya-python-sdk 3.x speaks the v2
-# (perpOB) API and renamed the trigger kinds TP/SL -> TAKE_PROFIT/STOP_LOSS.
-# Both SDKs install as the top-level `sdk` package, so only one can be present.
-REYA_V2 = hasattr(OrderType, "STOP_LOSS")
+# v2 = the perpOB order book (reya-python-sdk 3.x), v1 = today's API (2.2.x)
+REYA_V2 = API_VERSION == "v2"
 
 TESTNET_CHAIN_ID = 89346162
 MAINNET_API_HOST = "https://api.reya.xyz"
@@ -87,6 +87,45 @@ def _parse_ts_ms(ts) -> int:
         return int(dt.timestamp() * 1000)
     except ValueError:
         return _now_ms()
+
+
+def envFirst(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def tradingConfigFromEnv(walletAddress: Optional[str] = None, privateKey: Optional[str] = None,
+                         accountId=None, sandbox: bool = False) -> TradingConfig:
+    """SDK config for either API version. Arguments win over env vars; the
+    env names of both SDKs are accepted (v1 OWNER_WALLET_ADDRESS / PRIVATE_KEY /
+    ACCOUNT_ID first, then v2 PERP_WALLET_ADDRESS_1 / PERP_PRIVATE_KEY_1 /
+    PERP_ACCOUNT_ID_1), so switching REYA_API_VERSION needs no other .env change.
+    Built explicitly because the v2 SDK client no longer takes `private_key=`."""
+    if sandbox:
+        chainId = TESTNET_CHAIN_ID
+        apiUrl = TESTNET_API_HOST + "/v2"
+    else:
+        chainId = int(os.environ.get("CHAIN_ID", MAINNET_CHAIN_ID))
+        defaultHost = MAINNET_API_HOST if chainId == MAINNET_CHAIN_ID else TESTNET_API_HOST
+        apiUrl = os.environ.get("REYA_API_URL", defaultHost + "/v2")
+    accountId = accountId or envFirst("ACCOUNT_ID", "PERP_ACCOUNT_ID_1")
+    v2Settings = {}
+    if REYA_V2:
+        # read by the v2 SDK's own from_env(); a devnet may need both
+        dexId = os.environ.get("REYA_DEX_ID")
+        v2Settings = {"orders_gateway_address": os.environ.get("REYA_ORDERS_GATEWAY"),
+                      "dex_id_override": int(dexId) if dexId else None}
+    return TradingConfig(
+        api_url=apiUrl,
+        chain_id=chainId,
+        owner_wallet_address=walletAddress or envFirst("OWNER_WALLET_ADDRESS", "PERP_WALLET_ADDRESS_1"),
+        private_key=privateKey or envFirst("PRIVATE_KEY", "PERP_PRIVATE_KEY_1"),
+        account_id=int(accountId) if accountId is not None else None,
+        **v2Settings,
+    )
 
 
 def run_async(coro):
@@ -209,28 +248,12 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         self.client: ReyaTradingClient = ReyaTradingClient(self.buildTradingConfig(config))
 
     def buildTradingConfig(self, config: Dict[str, Any]) -> TradingConfig:
-        """SDK config from the ccxt credentials, falling back to the env vars the
-        SDK itself reads (v1 names first, then the v2 PERP_*_1 names). Built
-        explicitly because the v2 SDK client no longer takes `private_key=` and
-        its from_env() only knows the PERP_*_1 names."""
-        if self.isSandboxModeEnabled:
-            chainId = TESTNET_CHAIN_ID
-            apiUrl = TESTNET_API_HOST + "/v2"
-        else:
-            chainId = int(os.environ.get("CHAIN_ID", MAINNET_CHAIN_ID))
-            defaultHost = MAINNET_API_HOST if chainId == MAINNET_CHAIN_ID else TESTNET_API_HOST
-            apiUrl = os.environ.get("REYA_API_URL", defaultHost + "/v2")
-        accountId = (self.safe_value(self.options, "account_id")
-                     or os.environ.get("ACCOUNT_ID") or os.environ.get("PERP_ACCOUNT_ID_1"))
-        return TradingConfig(
-            api_url=apiUrl,
-            chain_id=chainId,
-            owner_wallet_address=(config.get("walletAddress")
-                                  or os.environ.get("OWNER_WALLET_ADDRESS") or os.environ.get("PERP_WALLET_ADDRESS_1")),
-            private_key=(config.get("privateKey")
-                         or os.environ.get("PRIVATE_KEY") or os.environ.get("PERP_PRIVATE_KEY_1")),
-            account_id=int(accountId) if accountId is not None else None,
-        )
+        """SDK config from the ccxt credentials, falling back to the env vars
+        (see tradingConfigFromEnv)."""
+        return tradingConfigFromEnv(walletAddress=config.get("walletAddress"),
+                                    privateKey=config.get("privateKey"),
+                                    accountId=self.safe_value(self.options, "account_id"),
+                                    sandbox=self.isSandboxModeEnabled)
 
     # -------------------
     # Signing: call SDK signer only for private endpoints, TODO right now not working good

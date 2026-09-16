@@ -36,6 +36,34 @@ pip install git+https://github.com/Reya-Labs/reya-python-sdk
 ```
 
 
+## API version (v1 / v2)
+
+Reya's current API (v1) needs reya-python-sdk 2.2.x; the v2 order book ("perpOB",
+mainnet from 2026-09-28) needs 3.5.x. Both install as the package `sdk`, so the v2 SDK
+lives in its own directory and `REYA_API_VERSION` picks one at import time:
+
+```
+REYA_API_VERSION=v1   # default; v2 for the perpOB API
+```
+
+It is read from the process environment or the first `.env` found from the working
+directory upwards. Install the v2 SDK next to the regular one (Python 3.12+):
+
+```
+pip install --no-deps --target <venv>/reya_sdk/v2 "git+https://github.com/Reya-Labs/reya-python-sdk@37450ccb2babc99398d1ac1290d48860a9a2e2fa"
+```
+
+`<venv>/reya_sdk/v1` works the same way for the v1 SDK; without it v1 imports `sdk` from
+site-packages. `REYA_SDK_V1_PATH` / `REYA_SDK_V2_PATH` override the directories. Importing the
+adapter fails with the install command when the selected SDK is not the one found.
+Credentials may use either SDK's env names (`OWNER_WALLET_ADDRESS` / `PRIVATE_KEY` /
+`ACCOUNT_ID` or `PERP_WALLET_ADDRESS_1` / `PERP_PRIVATE_KEY_1` / `PERP_ACCOUNT_ID_1`);
+`reya_ccxt_adapter.Reya.tradingConfigFromEnv()` reads them for both. For the devnet pass
+`{"sandbox": True}`; v2 also reads `REYA_DEX_ID` and `REYA_ORDERS_GATEWAY`.
+
+Tests: `REYA_API_VERSION=v1 pytest tests` and `REYA_API_VERSION=v2 pytest tests`; the loader
+tests need `REYA_SDK_V1_PATH` and `REYA_SDK_V2_PATH`.
+
 ## Environment Setup
 
 Create a `.env` file in the project root with the following variables:
