@@ -144,13 +144,24 @@ ORACLE_PRICES_V2 = [{"asset": "ETH", "oraclePrice": "2392.5", "updatedAt": 1},
                     {"asset": "SRUSD", "oraclePrice": "1.07", "updatedAt": 1}]
 
 
-@pytest.mark.parametrize("ticker,expected", [("WETHRUSD", 2392.5), ("WSTETHRUSD", 2976.25)])
-def test_collateral_price(ticker, expected):
+def makeCollateralExchange(ticker, price):
     if ReyaModule.REYA_V2:
-        ex, fake = makeLoadedExchange({"v2/assetOraclePrices": ORACLE_PRICES_V2})
-    else:
-        ex, fake = makeLoadedExchange({"v2/prices/{symbol}": {"symbol": ticker, "oraclePrice": str(expected)}})
+        return makeLoadedExchange({"v2/assetOraclePrices": ORACLE_PRICES_V2})[0]
+    return makeLoadedExchange({"v2/prices/{symbol}": {"symbol": ticker, "oraclePrice": str(price)}})[0]
+
+
+@pytest.mark.parametrize("ticker,expected", [("WETHRUSD", 2392.5), ("WSTETHRUSD", 2976.25), ("SRUSDRUSD", 1.07)])
+def test_collateral_price(ticker, expected):
+    ex = makeCollateralExchange(ticker, expected)
     assert ex._getCollateralPriceUsd(ticker) == expected
+
+
+def test_staked_rusd_balance_uses_oracle_price():
+    ex = makeCollateralExchange("SRUSDRUSD", 1.07)
+    ex.public_get_api_accounts_balance = lambda params: [{"asset": "SRUSD", "realBalance": "100"}]
+    ex.fetch_open_orders = lambda *a, **k: []
+    ex.fetch_positions = lambda *a, **k: []
+    assert ex.fetch_balance()["RUSD"]["total"] == pytest.approx(100 * 1.07 * 0.9)
 
 
 POSITION = {"exchangeId": 1, "symbol": "BTCRUSDPERP", "accountId": ACCOUNT_ID, "qty": "0.5", "side": "B",

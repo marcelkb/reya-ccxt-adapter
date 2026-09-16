@@ -510,7 +510,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     #   oracleAsset: the asset's name on v2/assetOraclePrices (v2 has no /prices)
     COLLATERAL_HAIRCUTS = {
         "RUSD": {"haircut": 0.0, "ticker": None},
-        "SRUSD": {"haircut": 0.10, "ticker": None},  # staked RUSD, valued ~1:1 in USD
+        "SRUSD": {"haircut": 0.10, "ticker": "SRUSDRUSD", "oracleAsset": "SRUSD"},  # staked RUSD accrues above 1 RUSD
         "ETH": {"haircut": 0.10, "ticker": "WETHRUSD", "oracleAsset": "ETH"},  # accountBalances reports plain "ETH"
         "WETH": {"haircut": 0.10, "ticker": "WETHRUSD", "oracleAsset": "ETH"},  # alias, forward-compat
         "WSTETH": {"haircut": 0.15, "ticker": "WSTETHRUSD", "oracleAsset": "WSTETH"},
