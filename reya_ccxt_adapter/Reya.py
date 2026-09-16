@@ -1564,8 +1564,21 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         return self.create_order(symbol, EOrderType.MARKET.value, side, amount, price, params)
 
     def cancel_order(self, id: str, symbol: Str = None, params={}):
-        result:CancelOrderResponse = run_async(self.client.cancel_order(order_id=id))
-        return result.status == "CANCELLED"
+        if not REYA_V2:
+            result:CancelOrderResponse = run_async(self.client.cancel_order(order_id=id))
+            return result.status == "CANCELLED"
+        # v2 signs the cancel over the market, so it needs the order's symbol
+        if symbol is None:
+            request = {"wallet_address": self.walletAddress}
+            for item in self.public_get_open_orders(request):
+                if str(item.get('orderId')) == str(id):
+                    symbol = item.get('symbol')
+                    break
+            else:
+                raise ccxt.OrderNotFound(self.id + " cancel_order could not find open order id " + str(id))
+        result:CancelOrderResponse = run_async(self.client.cancel_order(
+            symbol=self.convertSymbolToReyaNotation(symbol), order_id=str(id)))
+        return result.status == OrderStatus.CANCELLED
 
     def fetch_accounts(self, params={}):
         request = {"wallet_address": self.walletAddress}

@@ -256,3 +256,23 @@ def test_filled_ioc():
     assert (order["id"], order["status"]) == ("83", "filled")
     if ReyaModule.REYA_V2:
         assert order["filled"] == 0.01
+
+
+def test_cancel_order_with_symbol():
+    ex, orders = makeTradingExchange({"status": "CANCELLED", "orderId": "90"})
+    assert ex.cancel_order("90", "BTC/RUSD:RUSD") is True
+    sent = orders.requests[0]
+    assert sent["orderId"] == "90"
+    if ReyaModule.REYA_V2:
+        assert (sent["symbol"], sent["accountId"]) == ("BTCRUSDPERP", ACCOUNT_ID)
+
+
+@pytest.mark.skipif(not ReyaModule.REYA_V2, reason="v1 cancels by order id alone")
+def test_cancel_order_without_symbol_looks_it_up():
+    ex, orders = makeTradingExchange({"status": "CANCELLED", "orderId": "91"})
+    ex.request.responses["v2/wallet/{wallet_address}/openOrders"] = [
+        {"symbol": "ETHRUSDPERP", "orderId": "5", "status": "OPEN", "side": "B", "qty": "1", "orderType": "LIMIT"},
+        {"symbol": "BTCRUSDPERP", "orderId": "91", "status": "OPEN", "side": "B", "qty": "1", "orderType": "LIMIT"},
+    ]
+    assert ex.cancel_order("91") is True
+    assert orders.requests[0]["symbol"] == "BTCRUSDPERP"
