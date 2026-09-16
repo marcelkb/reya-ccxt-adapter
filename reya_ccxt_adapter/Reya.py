@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 from datetime import datetime
 from decimal import Decimal
@@ -45,8 +46,18 @@ from reya_ccxt_adapter.abstract.Reya import ImplicitAPI
 from reya_ccxt_adapter.const import EOrderSide, EOrderStatus, EOrderType
 from sdk.open_api import CreateOrderResponse, TimeInForce, CancelOrderResponse, OrderType
 from sdk.reya_rest_api import ReyaTradingClient
-from sdk.reya_rest_api.config import REYA_DEX_ID
+from sdk.reya_rest_api.config import REYA_DEX_ID, MAINNET_CHAIN_ID, TradingConfig
 from sdk.reya_rest_api.models import TriggerOrderParameters, LimitOrderParameters
+
+# Protocol mode follows the installed SDK: reya-python-sdk 3.x speaks the v2
+# (perpOB) API and renamed the trigger kinds TP/SL -> TAKE_PROFIT/STOP_LOSS.
+# Both SDKs install as the top-level `sdk` package, so only one can be present.
+REYA_V2 = hasattr(OrderType, "STOP_LOSS")
+
+TESTNET_CHAIN_ID = 89346162
+MAINNET_API_HOST = "https://api.reya.xyz"
+# v1 testnet (cronos) vs. v2 testnet (devnet1, the perpOB deployment)
+TESTNET_API_HOST = "https://api-devnet.reya-cronos.network" if REYA_V2 else "https://api-cronos.reya.xyz"
 
 try:
     import ccxt  # type: ignore
@@ -124,8 +135,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             },
             "urls": {
                 "api": {
-                    "public": "https://api.reya.xyz",
-                    "private": "https://api.reya.xyz",
+                    "public": MAINNET_API_HOST,
+                    "private": MAINNET_API_HOST,
+                },
+                # selected by ccxt's sandbox mode ({"sandbox": True} in the config)
+                "test": {
+                    "public": TESTNET_API_HOST,
+                    "private": TESTNET_API_HOST,
                 },
                 "docs": "https://docs.reya.xyz/technical-docs/reya-dex-rest-api-v2",
             },
@@ -187,7 +203,31 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
     def __init__(self, config: Dict[str, Any] = {}):
         super().__init__(config)
-        self.client: ReyaTradingClient = ReyaTradingClient(private_key=config["privateKey"] if "privateKey" in config else None)
+        self.client: ReyaTradingClient = ReyaTradingClient(self.buildTradingConfig(config))
+
+    def buildTradingConfig(self, config: Dict[str, Any]) -> TradingConfig:
+        """SDK config from the ccxt credentials, falling back to the env vars the
+        SDK itself reads (v1 names first, then the v2 PERP_*_1 names). Built
+        explicitly because the v2 SDK client no longer takes `private_key=` and
+        its from_env() only knows the PERP_*_1 names."""
+        if self.isSandboxModeEnabled:
+            chainId = TESTNET_CHAIN_ID
+            apiUrl = TESTNET_API_HOST + "/v2"
+        else:
+            chainId = int(os.environ.get("CHAIN_ID", MAINNET_CHAIN_ID))
+            defaultHost = MAINNET_API_HOST if chainId == MAINNET_CHAIN_ID else TESTNET_API_HOST
+            apiUrl = os.environ.get("REYA_API_URL", defaultHost + "/v2")
+        accountId = (self.safe_value(self.options, "account_id")
+                     or os.environ.get("ACCOUNT_ID") or os.environ.get("PERP_ACCOUNT_ID_1"))
+        return TradingConfig(
+            api_url=apiUrl,
+            chain_id=chainId,
+            owner_wallet_address=(config.get("walletAddress")
+                                  or os.environ.get("OWNER_WALLET_ADDRESS") or os.environ.get("PERP_WALLET_ADDRESS_1")),
+            private_key=(config.get("privateKey")
+                         or os.environ.get("PRIVATE_KEY") or os.environ.get("PERP_PRIVATE_KEY_1")),
+            account_id=int(accountId) if accountId is not None else None,
+        )
 
     # -------------------
     # Signing: call SDK signer only for private endpoints, TODO right now not working good
