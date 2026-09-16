@@ -1131,6 +1131,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 if side == EOrderSide.SELL:
                     if base_amount > 0:
                         base_amount = -base_amount
+                funding_value = 0
                 try:
                     if marketData is not None:
                         if side == EOrderSide.BUY:
@@ -1287,6 +1288,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             if side == EOrderSide.SELL:
                 if base_amount > 0:
                     base_amount = -base_amount
+            funding_value = 0
             try:
                 if marketData is not None:
                     if side == EOrderSide.BUY:

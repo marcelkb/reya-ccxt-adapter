@@ -153,6 +153,28 @@ def test_collateral_price(ticker, expected):
     assert ex._getCollateralPriceUsd(ticker) == expected
 
 
+POSITION = {"exchangeId": 1, "symbol": "BTCRUSDPERP", "accountId": ACCOUNT_ID, "qty": "0.5", "side": "B",
+            "avgEntryPrice": "59000", "avgEntryFundingValue": "10", "lastTradeSequenceNumber": 1}
+
+
+def makePositionExchange():
+    """Positions and the ticker answer; market data (funding) fails."""
+    ticker = ({"v2/perpMarket/{symbol}/summary": SUMMARY_V2} if ReyaModule.REYA_V2
+              else {"v2/prices/{symbol}": PRICE_V1})
+    ex, fake = makeLoadedExchange(dict(ticker, **{"v2/wallet/{wallet_address}/positions": [POSITION]}))
+    ex.fetch_open_orders = lambda *a, **k: []
+    ex.fetch_leverage = lambda *a, **k: 10
+    return ex
+
+
+@pytest.mark.parametrize("fetch", ["fetch_position", "fetch_positions"])
+def test_position_without_market_data_counts_no_funding(fetch):
+    ex = makePositionExchange()
+    pos = ex.fetch_position("BTC/RUSD:RUSD") if fetch == "fetch_position" else ex.fetch_positions()[0]
+    last = 60000.5 if ReyaModule.REYA_V2 else 60001.5
+    assert pos["unrealizedPnl"] == pytest.approx(0.5 * (last - 59000))
+
+
 EXEC_V1 = {"exchangeId": 1, "symbol": "BTCRUSDPERP", "accountId": ACCOUNT_ID, "qty": "0.01", "side": "B",
            "price": "60000", "fee": "0.24", "type": "ORDER_MATCH", "timestamp": 1747927089946, "sequenceNumber": 7}
 EXEC_V2 = {"exchangeId": 2, "symbol": "BTCRUSDPERP", "takerAccountId": 99, "makerAccountId": 98,
