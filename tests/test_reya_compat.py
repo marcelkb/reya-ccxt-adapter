@@ -157,3 +157,102 @@ def test_parse_trade_v2_as_maker_without_fee():
     del row["makerFee"]
     t = makeExchange().parse_trade(row)
     assert (t["side"], t["fee"]["cost"]) == ("buy", 0)
+
+
+class FakeOrderEntry:
+    """Replaces the SDK's OrderEntryApi: keeps the signed request, returns a canned ack."""
+
+    def __init__(self, response):
+        self.response = response
+        self.requests = []
+
+    async def create_order(self, create_order_request):
+        self.requests.append(create_order_request.to_dict())
+        return CreateOrderResponse.from_dict(self.response)
+
+    async def cancel_order(self, cancel_order_request):
+        self.requests.append(cancel_order_request.to_dict())
+        return CancelOrderResponse.from_dict(dict(self.response))
+
+
+from sdk.open_api import CreateOrderResponse, CancelOrderResponse  # noqa: E402
+
+
+def makeTradingExchange(response):
+    ex, fake = makeLoadedExchange({})
+    ex.load_markets()
+    ex.client._symbol_to_market_id = {"BTCRUSDPERP": 1}
+    orders = FakeOrderEntry(response)
+    ex.client._resources.orders = orders
+    return ex, orders
+
+
+def test_stop_loss_trigger_payload():
+    ex, orders = makeTradingExchange({"status": "OPEN", "orderId": "77"})
+    order = ex.create_order("BTC/RUSD:RUSD", "limit", "sell", 0.01, 60000.0,
+                            {"stopLossPrice": 60000.0, "reduceOnly": True})
+    sent = orders.requests[0]
+    assert order["id"] == "77" and order["status"] == "open"
+    assert float(sent["triggerPx"]) == 60000.0
+    assert "qty" not in sent or sent["qty"] is None
+    if ReyaModule.REYA_V2:
+        assert sent["orderType"] == "STOP_LOSS"
+        assert sent["timeInForce"] == "GTC"
+        assert "reduceOnly" not in sent
+        assert float(sent["limitPx"]) == 59700.0  # worst fill 0.5% through the trigger
+    else:
+        assert sent["orderType"] == "SL"
+
+
+def test_take_profit_trigger_closing_short_limit_above_trigger():
+    ex, orders = makeTradingExchange({"status": "OPEN", "orderId": "78"})
+    ex.create_order("BTC/RUSD:RUSD", "limit", "buy", 0.01, 50000.123,
+                    {"takeProfitPrice": 50000.123, "reduceOnly": True, "triggerSlippage": 0.01})
+    sent = orders.requests[0]
+    if ReyaModule.REYA_V2:
+        assert sent["orderType"] == "TAKE_PROFIT"
+        assert float(sent["limitPx"]) == 50500.13  # 1% above, rounded up to the 0.01 tick
+    else:
+        assert sent["orderType"] == "TP"
+
+
+def test_resting_limit_is_open():
+    ex, orders = makeTradingExchange({"status": "OPEN", "orderId": "79"})
+    order = ex.create_order("BTC/RUSD:RUSD", "limit", "buy", 0.01, 59000.0, {})
+    assert (order["id"], order["status"]) == ("79", "open")
+    assert orders.requests[0]["timeInForce"] == "GTC"
+    assert "reduceOnly" not in orders.requests[0]
+
+
+@pytest.mark.skipif(not ReyaModule.REYA_V2, reason="v2 acks a no-fill IOC as CANCELLED")
+def test_ioc_without_fill_raises_ioc_no_match():
+    ex, orders = makeTradingExchange({"status": "CANCELLED", "orderId": "80", "execQty": "0", "cumQty": "0",
+                                      "cancelReason": "NO_LIQUIDITY"})
+    with pytest.raises(ReyaModule.InvalidOrder) as info:
+        ex.create_order("BTC/RUSD:RUSD", "market", "buy", 0.01, 60300.0, {"reduceOnly": True})
+    # stat_test's ReyaAdapter.is_ioc_no_match_error keys off these words
+    assert "not immediately match" in str(info.value).lower()
+    assert orders.requests[0]["reduceOnly"] is True
+
+
+@pytest.mark.skipif(not ReyaModule.REYA_V2, reason="v2 acks a partial IOC as CANCELLED with cumQty")
+def test_partially_filled_ioc_reports_fill():
+    ex, orders = makeTradingExchange({"status": "CANCELLED", "orderId": "81", "execQty": "0.004",
+                                      "cumQty": "0.004", "cancelReason": "NO_LIQUIDITY"})
+    order = ex.create_order("BTC/RUSD:RUSD", "market", "buy", 0.01, 60300.0, {})
+    assert (order["id"], order["status"], order["filled"]) == ("81", "canceled", 0.004)
+
+
+@pytest.mark.skipif(not ReyaModule.REYA_V2, reason="postOnly exists only on v2")
+def test_post_only_limit():
+    ex, orders = makeTradingExchange({"status": "OPEN", "orderId": "82"})
+    ex.create_order("BTC/RUSD:RUSD", "limit", "buy", 0.01, 59000.0, {"postOnly": True})
+    assert orders.requests[0]["postOnly"] is True
+
+
+def test_filled_ioc():
+    ex, orders = makeTradingExchange({"status": "FILLED", "orderId": "83", "execQty": "0.01", "cumQty": "0.01"})
+    order = ex.create_order("BTC/RUSD:RUSD", "market", "sell", 0.01, 59700.0, {})
+    assert (order["id"], order["status"]) == ("83", "filled")
+    if ReyaModule.REYA_V2:
+        assert order["filled"] == 0.01

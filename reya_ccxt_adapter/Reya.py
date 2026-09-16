@@ -35,7 +35,7 @@ import math
 import os
 import time
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from io import UnsupportedOperation
 from typing import Optional, Dict, Any, List
 
@@ -44,7 +44,7 @@ from ccxt.base.types import Str, Int, FundingRate, OrderSide, Num, Strings
 
 from reya_ccxt_adapter.abstract.Reya import ImplicitAPI
 from reya_ccxt_adapter.const import EOrderSide, EOrderStatus, EOrderType
-from sdk.open_api import CreateOrderResponse, TimeInForce, CancelOrderResponse, OrderType
+from sdk.open_api import CreateOrderResponse, TimeInForce, CancelOrderResponse, OrderType, OrderStatus
 from sdk.reya_rest_api import ReyaTradingClient
 from sdk.reya_rest_api.config import REYA_DEX_ID, MAINNET_CHAIN_ID, TradingConfig
 from sdk.reya_rest_api.models import TriggerOrderParameters, LimitOrderParameters
@@ -198,6 +198,9 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 # control fetch_tickers concurrency (batch size). None -> full parallel
                 "tickers_batch_size": None,
                 "proxy_ohlcv": False,
+                # v2 only: worst fill of a fired TP/SL child, as a fraction past
+                # the trigger. Must stay inside the venue's unpublished band.
+                "trigger_slippage": 0.005,
             },
         })
 
@@ -1420,10 +1423,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         # reduce-only market close). Reya's close-only resting protection is the
         # native TP/SL triggers, not limits.
         reduceOnly = bool(params.get('reduceOnly', params.get('reduce_only', False)))
+        market = self.markets.get(symbol)
         symbol = self.convertSymbolToReyaNotation(symbol)
 
         if type == EOrderType.LIMIT.value:
             time_in_force = TimeInForce.GTC
+            # v2 enforces post-only at the matching engine; v1 has no such field
+            postOnly = {"post_only": True} if REYA_V2 and params.get('postOnly') else {}
             limit_params = LimitOrderParameters(
                 symbol=symbol,
                 is_buy=True if side.lower() == 'buy' else False,
@@ -1431,7 +1437,8 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 qty=str(amount),
                 time_in_force=time_in_force,
                 reduce_only=None,  # None → field omitted from wire (server 400s on any reduceOnly for GTC)
-                expires_after=params.get('expires_after')
+                expires_after=params.get('expires_after'),
+                **postOnly
             )
         else:
             if price is None:
@@ -1451,22 +1458,12 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             if "takeProfitPrice" in params:
                 takeProfitPrice = params['takeProfitPrice']
                 result:CreateOrderResponse = run_async(self.client.create_trigger_order(
-                    TriggerOrderParameters(
-                        symbol=symbol,
-                        is_buy=side.lower() == "buy",
-                        trigger_px=str(takeProfitPrice),
-                        trigger_type=OrderType.TP,
-                    )
+                    self.buildTriggerParameters(symbol, market, side, takeProfitPrice, "TP", params)
                 ))
             elif "stopLossPrice" in params:
                 stopLossPrice = params['stopLossPrice']
                 result:CreateOrderResponse = run_async(self.client.create_trigger_order(
-                    TriggerOrderParameters(
-                        symbol=symbol,
-                        is_buy=side.lower() == "buy",
-                        trigger_px=str(stopLossPrice),
-                        trigger_type=OrderType.SL,
-                    )
+                    self.buildTriggerParameters(symbol, market, side, stopLossPrice, "SL", params)
                 ))
             elif "reduceOnly" or "reduce_only" in params:
                 result: CreateOrderResponse = run_async(self.client.create_limit_order(limit_params))
@@ -1475,6 +1472,7 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
         id = None
         status = "open"
+        filled = None
         if result is not None:
             if result.status is not None:
                 status = result.status
@@ -1483,6 +1481,15 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             else:
                 if type == EOrderType.MARKET.value:
                     id = "FilledOrderPlaceholderId"
+            if REYA_V2:
+                # v2 acks an IOC that could not (fully) fill as CANCELLED instead
+                # of rejecting it; cumQty says how much did fill.
+                filled = float(result.cum_qty) if result.cum_qty is not None else None
+                if status == OrderStatus.CANCELLED and not filled:
+                    reason = f"{result.cancel_reason}: {result.cancel_reason_message}"
+                    if time_in_force == TimeInForce.IOC:
+                        raise InvalidOrder(f"{self.id} IOC not immediately matched ({reason})")
+                    raise InvalidOrder(f"{self.id} order cancelled on entry ({reason})")
         else:
             # result = {}
             raise InvalidOrder(self.id + ' ' + self.json(result))
@@ -1509,9 +1516,10 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             'amount': amount,
             'cost': None,
             'average': None,
-            'filled': None,
+            'filled': filled,
             'remaining': None,
-            'status': EOrderStatus.valueOf(status.lower()),
+            # the venue spells it CANCELLED, ccxt/EOrderStatus "canceled"
+            'status': EOrderStatus.valueOf(status.lower().replace("cancelled", "canceled")),
             'fee':
                 {
                     'cost':0,
@@ -1519,6 +1527,35 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                     'rate': 0.004
                 },
             'trades': []})
+
+    def buildTriggerParameters(self, symbol: str, market: Optional[Dict], side: str, triggerPrice, kind: str,
+                               params: Dict) -> TriggerOrderParameters:
+        """TP ("TP") or SL ("SL") trigger that closes the whole position with `side`."""
+        isBuy = side.lower() == "buy"
+        if not REYA_V2:
+            return TriggerOrderParameters(
+                symbol=symbol,
+                is_buy=isBuy,
+                trigger_px=str(triggerPrice),
+                trigger_type=OrderType.TP if kind == "TP" else OrderType.SL,
+            )
+        # v2 fires the trigger into a limit child: limit_px is its worst fill,
+        # past the trigger in the closing direction, snapped outward to the tick.
+        slippage = Decimal(str(params.get('triggerSlippage', self.safe_number(self.options, 'trigger_slippage'))))
+        tick = Decimal(str(market['info']['tickSize']))
+        worst = Decimal(str(triggerPrice)) * (1 + slippage if isBuy else 1 - slippage)
+        ticks = (worst / tick).to_integral_value(rounding=ROUND_CEILING if isBuy else ROUND_FLOOR)
+        # GTC child: a remainder the book can't take rests (cancel-only) instead
+        # of cancelling, and an IOC child that fills nothing still consumes the
+        # OCO sibling - either way GTC leaves the position less exposed.
+        return TriggerOrderParameters(
+            symbol=symbol,
+            is_buy=isBuy,
+            trigger_px=str(triggerPrice),
+            trigger_type=OrderType.TAKE_PROFIT if kind == "TP" else OrderType.STOP_LOSS,
+            limit_px=str(ticks * tick),
+            time_in_force=TimeInForce.GTC,
+        )
 
     def create_limit_order(self, symbol: str, side: OrderSide, amount: float, price: float, params={}):
         return self.create_order(symbol, EOrderType.LIMIT.value, side, amount, price, params)
