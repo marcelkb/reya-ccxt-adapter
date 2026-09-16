@@ -276,3 +276,10 @@ def test_cancel_order_without_symbol_looks_it_up():
     ]
     assert ex.cancel_order("91") is True
     assert orders.requests[0]["symbol"] == "BTCRUSDPERP"
+
+
+def test_sdk_patch_keeps_installed_sdk_version():
+    import sys
+    from sdk._version import SDK_VERSION
+    import reya_ccxt_adapter.sdk_patch  # noqa: F401
+    assert sys.modules["sdk._version"].SDK_VERSION == SDK_VERSION
