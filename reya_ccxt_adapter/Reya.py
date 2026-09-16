@@ -468,12 +468,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
     #   haircut: fraction of USD value deducted before counting towards margin
     #   ticker:  collateral oracle symbol (<ASSET>RUSD) used to price the asset in USD
     #            (None => valued 1:1 with USD)
+    #   oracleAsset: the asset's name on v2/assetOraclePrices (v2 has no /prices)
     COLLATERAL_HAIRCUTS = {
         "RUSD": {"haircut": 0.0, "ticker": None},
         "SRUSD": {"haircut": 0.10, "ticker": None},  # staked RUSD, valued ~1:1 in USD
-        "ETH": {"haircut": 0.10, "ticker": "WETHRUSD"},  # accountBalances reports plain "ETH"
-        "WETH": {"haircut": 0.10, "ticker": "WETHRUSD"},  # alias, forward-compat
-        "WSTETH": {"haircut": 0.15, "ticker": "WSTETHRUSD"},
+        "ETH": {"haircut": 0.10, "ticker": "WETHRUSD", "oracleAsset": "ETH"},  # accountBalances reports plain "ETH"
+        "WETH": {"haircut": 0.10, "ticker": "WETHRUSD", "oracleAsset": "ETH"},  # alias, forward-compat
+        "WSTETH": {"haircut": 0.15, "ticker": "WSTETHRUSD", "oracleAsset": "WSTETH"},
     }
 
     def _getSymbol(self, perp_name):
@@ -768,6 +769,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
 
     def _getCollateralPriceUsd(self, ticker: str) -> float:
         """USD oracle price for a collateral asset, looked up by its perp ticker."""
+        if REYA_V2:
+            asset = next(c["oracleAsset"] for c in self.COLLATERAL_HAIRCUTS.values() if c["ticker"] == ticker)
+            for entry in self.public_get_asset_oracle_prices({}):
+                # the venue spells some assets in mixed case (e.g. "wstETH")
+                if str(entry.get("asset")).upper() == asset:
+                    return float(entry.get("oraclePrice") or 0.0)
+            return 0.0
         raw = self.public_get_api_trading_prices({"symbol": ticker})
         price = self.safe_float(raw, 'oraclePrice')
         if price is None:

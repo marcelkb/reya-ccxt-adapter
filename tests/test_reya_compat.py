@@ -112,3 +112,17 @@ def test_fetch_ticker_last_price():
         assert ticker["last"] == 60000.5  # mark price: what v2 triggers fire on
     else:
         assert ticker["last"] == 60001.5  # pool price, unchanged v1 behaviour
+
+
+ORACLE_PRICES_V2 = [{"asset": "ETH", "oraclePrice": "2392.5", "updatedAt": 1},
+                    {"asset": "wstETH", "oraclePrice": "2976.25", "updatedAt": 1},
+                    {"asset": "SRUSD", "oraclePrice": "1.07", "updatedAt": 1}]
+
+
+@pytest.mark.parametrize("ticker,expected", [("WETHRUSD", 2392.5), ("WSTETHRUSD", 2976.25)])
+def test_collateral_price(ticker, expected):
+    if ReyaModule.REYA_V2:
+        ex, fake = makeLoadedExchange({"v2/assetOraclePrices": ORACLE_PRICES_V2})
+    else:
+        ex, fake = makeLoadedExchange({"v2/prices/{symbol}": {"symbol": ticker, "oraclePrice": str(expected)}})
+    assert ex._getCollateralPriceUsd(ticker) == expected
