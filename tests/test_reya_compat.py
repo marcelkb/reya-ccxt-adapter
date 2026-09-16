@@ -126,3 +126,34 @@ def test_collateral_price(ticker, expected):
     else:
         ex, fake = makeLoadedExchange({"v2/prices/{symbol}": {"symbol": ticker, "oraclePrice": str(expected)}})
     assert ex._getCollateralPriceUsd(ticker) == expected
+
+
+EXEC_V1 = {"exchangeId": 1, "symbol": "BTCRUSDPERP", "accountId": ACCOUNT_ID, "qty": "0.01", "side": "B",
+           "price": "60000", "fee": "0.24", "type": "ORDER_MATCH", "timestamp": 1747927089946, "sequenceNumber": 7}
+EXEC_V2 = {"exchangeId": 2, "symbol": "BTCRUSDPERP", "takerAccountId": 99, "makerAccountId": 98,
+           "takerOrderId": "111", "makerOrderId": "222", "qty": "0.01", "side": "B", "price": "60000",
+           "takerFee": "0.24", "makerFee": "0.06", "type": "ORDER_MATCH", "timestamp": 1747927089946,
+           "sequenceNumber": 7, "fillId": "555"}
+
+
+def test_parse_trade_v1_execution():
+    t = makeExchange().parse_trade(dict(EXEC_V1))
+    assert (t["side"], t["amount"], t["price"], t["fee"]["cost"]) == ("buy", 0.01, 60000, 0.24)
+
+
+def test_parse_trade_v2_as_taker():
+    t = makeExchange().parse_trade(dict(EXEC_V2, takerAccountId=ACCOUNT_ID))
+    assert (t["side"], t["fee"]["cost"], t["order"], t["id"]) == ("buy", 0.24, "111", "555")
+
+
+def test_parse_trade_v2_as_maker_flips_side():
+    # side is the TAKER's; our resting order took the other side of the fill
+    t = makeExchange().parse_trade(dict(EXEC_V2, makerAccountId=ACCOUNT_ID))
+    assert (t["side"], t["fee"]["cost"], t["order"], t["id"]) == ("sell", 0.06, "222", "555")
+
+
+def test_parse_trade_v2_as_maker_without_fee():
+    row = dict(EXEC_V2, makerAccountId=ACCOUNT_ID, side="A")
+    del row["makerFee"]
+    t = makeExchange().parse_trade(row)
+    assert (t["side"], t["fee"]["cost"]) == ("buy", 0)

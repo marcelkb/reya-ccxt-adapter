@@ -356,24 +356,37 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                   or raw.get('timestamp_ms'))
         ts = _parse_ts_ms(ts_raw)
 
+        # v2 executions carry both counterparties and state `side` from the
+        # taker's perspective. When our account was the maker, our fill went
+        # the other way and the maker fee/order id apply.
+        account_id = self.safe_value(self.options, 'account_id')
+        is_maker = (account_id is not None and 'makerAccountId' in raw
+                    and str(raw.get('makerAccountId')) == str(account_id)
+                    and str(raw.get('takerAccountId')) != str(account_id))
+
         side = None
         if "side" in raw and raw.get("side") == "B":
             side = EOrderSide.BUY.value
         else:
             side = EOrderSide.SELL.value
+        if is_maker:
+            side = EOrderSide.SELL.value if side == EOrderSide.BUY.value else EOrderSide.BUY.value
 
         amount = self.safe_number_2(raw, 'qty', 'amount')
 
         price = self.safe_number(raw, 'price')
 
         fee = None
-        fee_cost = self.safe_number_2(raw, 'fee', 'feePaid')
+        if is_maker:
+            fee_cost = self.safe_number(raw, 'makerFee', 0)
+        else:
+            fee_cost = self.safe_number_n(raw, ['fee', 'feePaid', 'takerFee'])
         if fee_cost is not None:
             fee = {"cost": abs(fee_cost), "currency": "RUSD"}
 
         return {
-            "id": self.safe_string_2(raw, 'trade_id', 'id'),
-            "order": self.safe_string_2(raw, 'order_id', 'orderId'),
+            "id": self.safe_string_n(raw, ['trade_id', 'id', 'fillId']),
+            "order": self.safe_string_n(raw, ['order_id', 'orderId', 'makerOrderId' if is_maker else 'takerOrderId']),
             "timestamp": ts,
             "datetime": self.iso8601(ts),
             "symbol": self.safe_string_2(raw, 'symbol', 'ticker'),
