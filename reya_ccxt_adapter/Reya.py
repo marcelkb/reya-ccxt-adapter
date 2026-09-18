@@ -569,10 +569,13 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         res = self.publicGetApiMarkets(params or {})
         # the SDK/docs return a list of market objects
         result = res if isinstance(res, list) else self.safe_value(res, 'data', res)
-        self.markets = {self.safe_string(m, 'id', str(self.safe_integer(m,'marketId'))) : m for m in result }
-        self.markets_by_id = self.markets
+        # Keep the raw rows here, NOT in self.markets: ccxt's load_markets fills
+        # self.markets from our return value, and overwriting it with venue rows
+        # keyed by market id broke every later self.market(symbol) call with
+        # BadSymbol whenever fetch_markets was called on its own.
+        raw_markets = {self.safe_string(m, 'id', str(self.safe_integer(m, 'marketId'))): m for m in result}
         out = []
-        for mid, m in self.markets.items():
+        for mid, m in raw_markets.items():
             quoteToken = self._getSymbol(m.get("symbol"))
             underlyingAsset = "RUSD"
             out.append({
@@ -1757,7 +1760,14 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             raise ccxt.ExchangeError(f"{self.id} fetch_trades could not find market id for symbol {symbol}")
 
         request = {"wallet_address": self.walletAddress}
-        items = self.public_get_trades(self.extend(request, params or {})) or []
+        # Same perpExecutions envelope as fetch_my_trades ({"data": [...],
+        # "meta": {...}}): iterating the dict itself walks its KEYS, and the
+        # symbol assignment below then died on a str.
+        resp = self.public_get_trades(self.extend(request, params or {}))
+        if isinstance(resp, dict):
+            items = resp.get("data") or resp.get("trades") or []
+        else:
+            items = resp or []
 
         for i in items:
             i['symbol'] = symbol
@@ -1770,23 +1780,17 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             trades = trades[-limit:]
         return trades
 
-    # deposit / withdraw (wallet endpoints)
+    # deposit / withdraw: collateral moves on the Reya chain, not over REST. The
+    # v1-era routes these used never existed in the v2 API, and both only ever
+    # raised a RuntimeError about options['wallet_address'], which nothing sets.
+    MONEY_FLOW_HINT = ("Reya moves collateral on-chain: use sdk.reya_rpc "
+                       "(deposit / withdraw / bridge) with the account owner's key.")
+
     def fetch_deposit_address(self, code: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        wallet_address = self.safe_value(self.options, 'wallet_address')
-        if wallet_address is None:
-            raise RuntimeError("fetch_deposit_address requires options['wallet_address']")
-        path = f"api/trading/wallet/{wallet_address}/deposit-address"
-        res = self.request(path, 'private', 'GET', params or {}, None)
-        return res
+        raise NotSupported(f"{self.id} has no deposit address over REST. {self.MONEY_FLOW_HINT}")
 
     def withdraw(self, code: str, amount: float, address: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        wallet_address = self.safe_value(self.options, 'wallet_address')
-        if wallet_address is None:
-            raise RuntimeError("withdraw requires options['wallet_address']")
-        body = {"currency": code, "amount": str(amount), "address": address}
-        body.update(params or {})
-        signed = self.sign("api/trading/wallet/withdraw", "private", "POST", body, None, None)
-        return self.request("api/trading/wallet/withdraw", 'private', 'POST', body, signed['headers'])
+        raise NotSupported(f"{self.id} cannot withdraw over REST. {self.MONEY_FLOW_HINT}")
 
     def get_current_stake_apy(self):
         request = {"pool_id": 1}

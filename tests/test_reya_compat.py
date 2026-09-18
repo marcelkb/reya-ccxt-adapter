@@ -6,6 +6,7 @@ test_sdk_loader.py says where each SDK comes from). No test touches the network.
 import os
 
 import pytest
+from ccxt import NotSupported
 
 from reya_ccxt_adapter import Reya as ReyaModule
 from reya_ccxt_adapter.Reya import Reya
@@ -220,6 +221,36 @@ def test_parse_trade_v2_as_maker_without_fee():
     del row["makerFee"]
     t = makeExchange().parse_trade(row)
     assert (t["side"], t["fee"]["cost"]) == ("buy", 0)
+
+
+def test_fetch_markets_leaves_symbol_lookup_intact():
+    # fetch_markets used to overwrite self.markets with the venue's raw rows keyed
+    # by market id, so every later self.market(symbol) call raised BadSymbol.
+    ex, _ = makeLoadedExchange({})
+    ex.load_markets()
+    ex.fetch_markets()
+    assert ex.market("BTC/RUSD:RUSD")["id"] == "1"
+
+
+def test_fetch_trades_unwraps_the_execution_envelope():
+    # perpExecutions answers {"data": [...], "meta": {...}}; iterating the dict
+    # yielded its KEYS, and the adapter then crashed assigning to a string.
+    ex, _ = makeLoadedExchange({"v2/wallet/{wallet_address}/perpExecutions":
+                                {"data": [dict(EXEC_V2, takerAccountId=ACCOUNT_ID)], "meta": {"count": 1}}})
+    trades = ex.fetch_trades("BTC/RUSD:RUSD")
+    assert [(t["side"], t["amount"], t["price"]) for t in trades] == [("buy", 0.01, 60000)]
+
+
+@pytest.mark.parametrize("call", [
+    lambda ex: ex.fetch_deposit_address("RUSD"),
+    lambda ex: ex.withdraw("RUSD", 1.0, WALLET),
+])
+def test_money_flows_are_on_chain_only(call):
+    # The REST API has no deposit/withdraw route: collateral moves through the
+    # chain (sdk.reya_rpc). The adapter used to build a v1-era path and fail with
+    # a RuntimeError about an option nobody sets.
+    with pytest.raises(NotSupported):
+        call(makeExchange())
 
 
 class FakeOrderEntry:
