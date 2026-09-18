@@ -1673,7 +1673,45 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                     continue
                 if symbol is None or symbol == item.get('symbol'):
                     return self.parse_order(item)
+        # orderHistory records RESTING orders only (LIMIT/SL/TP, all GTC): a
+        # market order is IOC, never rests, and shows up in neither route — it
+        # exists only as its fills. Rebuild it from those, so the caller can
+        # still read the fill price and fee of the entry it just sent.
+        ccxtSymbol = self.convertSymbolToCcxtNotation(symbol) if symbol else None
+        fills = [t for t in self.fetch_my_trades(symbol=ccxtSymbol, params=params)
+                 if str(t.get('order')) == str(id)]
+        if fills:
+            return self.orderFromFills(id, fills)
         raise ccxt.OrderNotFound(self.id + " fetch_order could not find order id " + str(id))
+
+    def orderFromFills(self, id: str, fills: List[Dict]) -> Dict:
+        """A filled market order, reconstructed from its executions."""
+        filled = sum(f['amount'] for f in fills)
+        cost = sum(f['amount'] * f['price'] for f in fills)
+        feeCost = sum((f['fee'] or {}).get('cost') or 0 for f in fills)
+        last = fills[-1]
+        return {
+            "id": str(id),
+            "timestamp": last['timestamp'],
+            "datetime": last['datetime'],
+            "status": EOrderStatus.FILLED.value,
+            "symbol": self.convertSymbolToCcxtNotation(last['symbol']) if last.get('symbol') else None,
+            "type": EOrderType.MARKET.value,
+            "side": last['side'],
+            "triggerPrice": None,
+            "stopLossPrice": None,
+            "takeProfitPrice": None,
+            "reduceOnly": False,
+            "price": cost / filled if filled else None,
+            "average": cost / filled if filled else None,
+            "amount": filled,
+            "filled": filled,
+            "remaining": 0,
+            "cost": cost,
+            "fee": {"cost": feeCost, "currency": "RUSD"},
+            "trades": fills,
+            "info": {"fills": [f['info'] for f in fills]},
+        }
 
     def fetch_orders(self, symbol: Optional[str] = None, since: Optional[int] = None, limit: Optional[int] = None,
                      params: Optional[Dict] = None) -> List[Dict]:

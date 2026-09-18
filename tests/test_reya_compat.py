@@ -281,10 +281,26 @@ def test_fetch_order_falls_back_to_order_history():
 @pytest.mark.skipif(not ReyaModule.REYA_V2, reason="v1 has no orderHistory route")
 def test_fetch_order_still_raises_for_an_unknown_id():
     ex, _ = makeLoadedExchange({"v2/wallet/{wallet_address}/openOrders": [],
-                                "v2/wallet/{wallet_address}/orderHistory": {"data": [], "meta": {}}})
+                                "v2/wallet/{wallet_address}/orderHistory": {"data": [], "meta": {}},
+                                "v2/wallet/{wallet_address}/perpExecutions": {"data": [], "meta": {}}})
     ex.load_markets()
     with pytest.raises(OrderNotFound):
         ex.fetch_order("nope", "BTC/RUSD:RUSD")
+
+
+def test_fetch_order_rebuilds_a_market_order_from_its_fills():
+    # orderHistory only records GTC orders: a market order (IOC) is in neither
+    # openOrders nor the history, and lives on only as its executions.
+    fill = dict(EXEC_V2, takerAccountId=ACCOUNT_ID, takerOrderId="777", qty="0.002", price="80524.211")
+    responses = {"v2/wallet/{wallet_address}/openOrders": [],
+                 "v2/wallet/{wallet_address}/perpExecutions": {"data": [fill], "meta": {}}}
+    if ReyaModule.REYA_V2:
+        responses["v2/wallet/{wallet_address}/orderHistory"] = {"data": [], "meta": {}}
+    ex, _ = makeLoadedExchange(responses)
+    ex.load_markets()
+    order = ex.fetch_order("777", "BTC/RUSD:RUSD")
+    assert (order["status"], order["type"], order["side"]) == ("filled", "market", "buy")
+    assert (order["filled"], order["average"], order["fee"]["cost"]) == (0.002, 80524.211, 0.24)
 
 
 class FakeOrderEntry:
