@@ -20,6 +20,11 @@ class ImplicitAPI:
     public_get_open_orders = publicGetApiOpenOrders = Entry('v2/wallet/{wallet_address}/openOrders', 'public',
                                                                     'GET', {'cost': 1})
 
+    # v2 only: every order state change, newest first. openOrders drops an order
+    # the moment it fills or cancels, so this is the only way to read one back.
+    public_get_order_history = publicGetApiOrderHistory = Entry('v2/wallet/{wallet_address}/orderHistory', 'public',
+                                                                    'GET', {'cost': 1})
+
 
     public_get_trades = publicGetApiTrades = Entry('v2/wallet/{wallet_address}/perpExecutions', 'public',
                                                                     'GET', {'cost': 1})

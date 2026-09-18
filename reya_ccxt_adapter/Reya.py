@@ -487,6 +487,10 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             "takeProfitPrice": self.safe_value(raw, 'triggerPx') if type == EOrderType.TAKE_PROFIT.value else None,
             "reduceOnly": self.safe_value(raw, 'reduceOnly', False),
             "price": self.safe_value_2(raw, 'limitPx', 'triggerPx'),
+            # The real fill price, which only orderHistory carries. Without it
+            # a caller reading a filled order sees the LIMIT bound instead —
+            # on a trigger that is the slippage band, not what was paid.
+            "average": self.safe_float(raw, 'avgFillPx'),
             "amount": self.safe_value(raw, 'qty', 0),
             "filled": self.safe_value(raw, 'execQty', 0),
             "remaining": str(float(self.safe_value(raw, 'qty', 0)) - float(self.safe_value(raw, 'execQty', 0))),
@@ -1651,6 +1655,21 @@ class Reya(ccxt.Exchange, ImplicitAPI):
                 return self.parse_order(item)
             if symbol == item['symbol']:
                 return self.parse_order(item)
+        # openOrders holds RESTING orders only, so a filled or cancelled order is
+        # gone from it. v2 keeps every state change in orderHistory (newest
+        # first, one row per change) — the first row for the id is its current
+        # state, with avgFillPx/cumQty. v1 has no such route, so it still 404s
+        # into OrderNotFound below.
+        if REYA_V2:
+            history = self.public_get_order_history(self.extend({"wallet_address": self.walletAddress},
+                                                                params or {}))
+            rows = history.get("data") or [] if isinstance(history, dict) else (history or [])
+            for item in rows:
+                order_id = str(item.get('order_id') or item.get('orderId') or item.get('id'))
+                if order_id != str(id):
+                    continue
+                if symbol is None or symbol == item.get('symbol'):
+                    return self.parse_order(item)
         raise ccxt.OrderNotFound(self.id + " fetch_order could not find order id " + str(id))
 
     def fetch_orders(self, symbol: Optional[str] = None, since: Optional[int] = None, limit: Optional[int] = None,

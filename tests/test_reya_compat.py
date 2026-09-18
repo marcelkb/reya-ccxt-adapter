@@ -6,7 +6,7 @@ test_sdk_loader.py says where each SDK comes from). No test touches the network.
 import os
 
 import pytest
-from ccxt import NotSupported
+from ccxt import NotSupported, OrderNotFound
 
 from reya_ccxt_adapter import Reya as ReyaModule
 from reya_ccxt_adapter.Reya import Reya
@@ -251,6 +251,40 @@ def test_money_flows_are_on_chain_only(call):
     # a RuntimeError about an option nobody sets.
     with pytest.raises(NotSupported):
         call(makeExchange())
+
+
+ORDER_HISTORY_FILLED = {"exchangeId": 2, "symbol": "BTCRUSDPERP", "accountId": ACCOUNT_ID,
+                        "orderId": "1876678006840229888", "sequenceNumber": 66042855, "qty": "0.001",
+                        "execQty": "0.001", "cumQty": "0.001", "avgFillPx": "80237.699", "fillCount": 1,
+                        "side": "A", "limitPx": "80016.905", "orderType": "STOP_LOSS", "triggerPx": "80419",
+                        "timeInForce": "GTC", "reduceOnly": False, "postOnly": False, "status": "FILLED",
+                        "createdAt": 1789739615288, "lastUpdateAt": 1789739615993}
+ORDER_HISTORY_OPEN = dict(ORDER_HISTORY_FILLED, sequenceNumber=66042850, execQty="0", cumQty="0",
+                          status="OPEN", lastUpdateAt=1789739615288)
+del ORDER_HISTORY_OPEN["avgFillPx"]
+
+
+@pytest.mark.skipif(not ReyaModule.REYA_V2, reason="v1 has no orderHistory route")
+def test_fetch_order_falls_back_to_order_history():
+    # openOrders only holds RESTING orders, so every filled or cancelled order
+    # raised OrderNotFound -- live_engine reads fills and fees through this call.
+    ex, fake = makeLoadedExchange({"v2/wallet/{wallet_address}/openOrders": [],
+                                   "v2/wallet/{wallet_address}/orderHistory":
+                                       {"data": [ORDER_HISTORY_FILLED, ORDER_HISTORY_OPEN], "meta": {}}})
+    ex.load_markets()
+    order = ex.fetch_order("1876678006840229888", "BTC/RUSD:RUSD")
+    # newest row wins: the FILLED state, not the OPEN one that shares the id
+    assert (order["status"], order["filled"], order["average"]) == ("filled", "0.001", 80237.699)
+    assert "v2/wallet/{wallet_address}/orderHistory" in [c[0] for c in fake.calls]
+
+
+@pytest.mark.skipif(not ReyaModule.REYA_V2, reason="v1 has no orderHistory route")
+def test_fetch_order_still_raises_for_an_unknown_id():
+    ex, _ = makeLoadedExchange({"v2/wallet/{wallet_address}/openOrders": [],
+                                "v2/wallet/{wallet_address}/orderHistory": {"data": [], "meta": {}}})
+    ex.load_markets()
+    with pytest.raises(OrderNotFound):
+        ex.fetch_order("nope", "BTC/RUSD:RUSD")
 
 
 class FakeOrderEntry:
