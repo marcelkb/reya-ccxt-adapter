@@ -43,11 +43,17 @@ mainnet from 2026-09-28) needs 3.5.x. Both install as the package `sdk`, so the 
 lives in its own directory and `REYA_API_VERSION` picks one at import time:
 
 ```
-REYA_API_VERSION=v1   # default; v2 for the perpOB API
+REYA_API_VERSION=auto           # default: v1 until the cutover, v2 from then on
+REYA_V2_SWITCH_AT=2026-09-28T13:00:00Z   # when "auto" flips (ISO 8601 UTC)
 ```
 
-It is read from the process environment or the first `.env` found from the working
-directory upwards. Install the v2 SDK next to the regular one (Python 3.12+):
+`v1` or `v2` pins that version and ignores the clock. Both settings are read from the
+process environment or the first `.env` found from the working directory upwards.
+
+The version is chosen once, when the adapter is imported, because one process can hold
+only one `sdk` package. A bot that was already running at the cutover therefore keeps
+v1 until it restarts; `reya_ccxt_adapter.sdk_loader.switchDue()` reports exactly that,
+and the adapter logs it on the first order it sends afterwards. Install the v2 SDK next to the regular one (Python 3.12+):
 
 ```
 pip install --no-deps --target <venv>/reya_sdk/v2 "git+https://github.com/Reya-Labs/reya-python-sdk@37450ccb2babc99398d1ac1290d48860a9a2e2fa"

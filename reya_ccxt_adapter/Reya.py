@@ -46,7 +46,7 @@ from ccxt.base.types import Str, Int, FundingRate, OrderSide, Num, Strings
 from reya_ccxt_adapter.abstract.Reya import ImplicitAPI
 from reya_ccxt_adapter.const import EOrderSide, EOrderStatus, EOrderType
 # selects the SDK by REYA_API_VERSION; must run before the first `sdk` import
-from reya_ccxt_adapter.sdk_loader import API_VERSION
+from reya_ccxt_adapter.sdk_loader import API_VERSION, logIfSwitchDue
 from sdk.open_api import CreateOrderResponse, TimeInForce, CancelOrderResponse, OrderType, OrderStatus
 from sdk.reya_rest_api import ReyaTradingClient
 from sdk.reya_rest_api.config import REYA_DEX_ID, MAINNET_CHAIN_ID, TradingConfig
@@ -1437,6 +1437,9 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         This method will attempt to fill accountId from options if not provided in params.
         """
         params = params or {}
+        # A process that started before the cutover still holds the v1 SDK, and
+        # only a restart can change that. Say so on the first order after it.
+        logIfSwitchDue()
         markets = self.load_markets()
         # map symbol to market_id/exchange_id/assetPairId if available
         market_id = params.get('marketId')
