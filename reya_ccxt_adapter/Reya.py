@@ -1557,8 +1557,9 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             'average': None,
             'filled': filled,
             'remaining': None,
-            # the venue spells it CANCELLED, ccxt/EOrderStatus "canceled"
-            'status': EOrderStatus.valueOf(status.lower().replace("cancelled", "canceled")),
+            # the venue spells it CANCELLED, ccxt/EOrderStatus "canceled".
+            # .value, not the member: ccxt 4.5's safe_order drops a non-str status.
+            'status': EOrderStatus.valueOf(status.lower().replace("cancelled", "canceled")).value,
             'fee':
                 {
                     'cost':0,
