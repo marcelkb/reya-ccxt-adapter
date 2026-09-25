@@ -51,8 +51,8 @@ pip install "git+https://github.com/Reya-Labs/reya-python-sdk@37450ccb2babc99398
 
 A branch moves under you between installs; a tag or a commit pins what you tested against.
 The v1 API lives on `main` and its tags (2.2.x), the v2 order book only on `feat/perpOB`
-and its `v3.x` tags -- there is no single ref that serves both, which is why the two SDKs
-are installed into separate directories (see below).
+and its `v3.x` tags -- no single ref serves both, so the installed one decides which API
+the adapter speaks (see below).
 
 On Windows pip's git clone can fail with "SSL certificate problem: unable to get local
 issuer certificate". Point git at the Windows certificate store for that command:
@@ -65,41 +65,41 @@ set GIT_CONFIG_COUNT=1 & set GIT_CONFIG_KEY_0=http.sslBackend & set GIT_CONFIG_V
 ## API version (v1 / v2)
 
 Reya's current API (v1) needs reya-python-sdk 2.2.x; the v2 order book ("perpOB",
-mainnet from 2026-09-28) needs 3.5.x. Both install as the package `sdk`, so the v2 SDK
-lives in its own directory and `REYA_API_VERSION` picks one at import time:
+mainnet from 2026-09-28) needs 3.x. Both install as the top-level package `sdk`, so a
+venv holds exactly one of them and **whichever is installed decides**. There is no flag
+to set: the adapter inspects the SDK at import and exposes the result as
+`reya_ccxt_adapter.sdk_loader.API_VERSION` (`"v1"` / `"v2"`) and `Reya.REYA_V2`.
+
+Upgrading to the v2 order book is therefore two steps -- install the 3.x SDK over the
+2.2.x one, then restart the process (Python 3.12+ either way):
 
 ```
-REYA_API_VERSION=auto           # default: v1 until the cutover, v2 from then on
-REYA_V2_SWITCH_AT=2026-09-28T13:00:00Z   # when "auto" flips (ISO 8601 UTC)
-```
-
-`v1` or `v2` pins that version and ignores the clock. Both settings are read from the
-process environment or the first `.env` found from the working directory upwards.
-
-The version is chosen once, when the adapter is imported, because one process can hold
-only one `sdk` package. A bot that was already running at the cutover therefore keeps
-v1 until it restarts; `reya_ccxt_adapter.sdk_loader.switchDue()` reports exactly that,
-and the adapter logs it on the first order it sends afterwards. Install the v2 SDK next to the regular one (Python 3.12+):
-
-```
-pip install --no-deps --target <venv>/reya_sdk/v2 "git+https://github.com/Reya-Labs/reya-python-sdk@v3.6.1.0"
+pip install --force-reinstall "git+https://github.com/Reya-Labs/reya-python-sdk@v3.6.1.0"
 ```
 
 `v3.6.1.0` is Reya's perpOB prerelease (2026-09-21, OpenAPI 3.6.1). The adapter's live devnet
 coverage run was made against commit `37450ccb2babc99398d1ac1290d48860a9a2e2fa` (3.5.2.0);
-install that ref instead of the tag to reproduce it exactly. Either works: the loader decides
-which API an SDK speaks by inspecting it, not by its version string, so any v2 SDK is accepted.
+install that ref instead of the tag to reproduce it exactly. Either works -- the adapter
+recognises any 3.x SDK.
 
-`<venv>/reya_sdk/v1` works the same way for the v1 SDK; without it v1 imports `sdk` from
-site-packages. `REYA_SDK_V1_PATH` / `REYA_SDK_V2_PATH` override the directories. Importing the
-adapter fails with the install command when the selected SDK is not the one found.
+The version is read once, when the adapter is imported, because one process can hold only
+one `sdk` package. A process that was running while the SDK was replaced keeps the old one
+until it restarts.
+
 Credentials may use either SDK's env names (`OWNER_WALLET_ADDRESS` / `PRIVATE_KEY` /
 `ACCOUNT_ID` or `PERP_WALLET_ADDRESS_1` / `PERP_PRIVATE_KEY_1` / `PERP_ACCOUNT_ID_1`);
-`reya_ccxt_adapter.Reya.tradingConfigFromEnv()` reads them for both. For the devnet pass
-`{"sandbox": True}`; v2 also reads `REYA_DEX_ID` and `REYA_ORDERS_GATEWAY`.
+`reya_ccxt_adapter.Reya.tradingConfigFromEnv()` reads them for both, so swapping the SDK
+needs no other `.env` change. For the devnet pass `{"sandbox": True}`; v2 also reads
+`REYA_DEX_ID` and `REYA_ORDERS_GATEWAY`.
 
-Tests: `REYA_API_VERSION=v1 pytest tests` and `REYA_API_VERSION=v2 pytest tests`; the loader
-tests need `REYA_SDK_V1_PATH` and `REYA_SDK_V2_PATH`.
+Tests: `pytest tests` runs against whichever SDK is importable, so run it once per SDK with
+that SDK on `PYTHONPATH`. The loader tests additionally need `REYA_SDK_V1_PATH` and
+`REYA_SDK_V2_PATH` pointing at a 2.2.x and a 3.x SDK, and skip when either is unset:
+
+```
+PYTHONPATH="<repo>;<v1 sdk dir>" REYA_SDK_V1_PATH=<v1 sdk dir> REYA_SDK_V2_PATH=<v2 sdk dir> pytest -q tests
+PYTHONPATH="<repo>;<v2 sdk dir>" REYA_SDK_V1_PATH=<v1 sdk dir> REYA_SDK_V2_PATH=<v2 sdk dir> pytest -q tests
+```
 
 ## Environment Setup
 

@@ -45,8 +45,8 @@ from ccxt.base.types import Str, Int, FundingRate, OrderSide, Num, Strings
 
 from reya_ccxt_adapter.abstract.Reya import ImplicitAPI
 from reya_ccxt_adapter.const import EOrderSide, EOrderStatus, EOrderType
-# selects the SDK by REYA_API_VERSION; must run before the first `sdk` import
-from reya_ccxt_adapter.sdk_loader import API_VERSION, logIfSwitchDue
+# reports which API the installed SDK speaks; must run before the first `sdk` import
+from reya_ccxt_adapter.sdk_loader import API_VERSION
 from sdk.open_api import CreateOrderResponse, TimeInForce, CancelOrderResponse, OrderType, OrderStatus
 from sdk.reya_rest_api import ReyaTradingClient
 from sdk.reya_rest_api.config import REYA_DEX_ID, MAINNET_CHAIN_ID, TradingConfig
@@ -103,7 +103,7 @@ def tradingConfigFromEnv(walletAddress: Optional[str] = None, privateKey: Option
     """SDK config for either API version. Arguments win over env vars; the
     env names of both SDKs are accepted (v1 OWNER_WALLET_ADDRESS / PRIVATE_KEY /
     ACCOUNT_ID first, then v2 PERP_WALLET_ADDRESS_1 / PERP_PRIVATE_KEY_1 /
-    PERP_ACCOUNT_ID_1), so switching REYA_API_VERSION needs no other .env change.
+    PERP_ACCOUNT_ID_1), so swapping the SDK needs no other .env change.
     Built explicitly because the v2 SDK client no longer takes `private_key=`."""
     if sandbox:
         chainId = TESTNET_CHAIN_ID
@@ -1437,9 +1437,6 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         This method will attempt to fill accountId from options if not provided in params.
         """
         params = params or {}
-        # A process that started before the cutover still holds the v1 SDK, and
-        # only a restart can change that. Say so on the first order after it.
-        logIfSwitchDue()
         markets = self.load_markets()
         # map symbol to market_id/exchange_id/assetPairId if available
         market_id = params.get('marketId')
