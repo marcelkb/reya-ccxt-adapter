@@ -143,6 +143,18 @@ def test_fetch_ticker_last_price():
         assert ticker["last"] == 60001.5  # pool price, unchanged v1 behaviour
 
 
+@pytest.mark.skipif(not ReyaModule.REYA_V2, reason="a v1 SDK reads /prices, which the switched venue drops")
+def test_fetch_ticker_falls_back_to_the_v1_summary_fields():
+    """The summary route exists on both venue generations but not with the same fields.
+
+    Measured 2026-09-27: a not-yet-switched mainnet answers /perpMarket/{s}/summary with
+    throttledOraclePrice + throttledPoolPrice and no markPrice, so a v2 SDK pointed at it
+    read last=None and _fetch_positions died computing PnL against it.
+    """
+    ex, _fake = makeLoadedExchange({"v2/perpMarket/{symbol}/summary": SUMMARY_V1})
+    assert ex.fetch_ticker("BTC/RUSD:RUSD")["last"] == 60001.5  # the v1 pool price
+
+
 @pytest.mark.parametrize("raw,last", [({"price": "5"}, 5.0), ({}, None), ({"poolPrice": "7", "price": "5"}, 7.0)])
 def test_parse_ticker_last_falls_back_to_price(raw, last):
     assert makeExchange().parse_ticker(raw)["last"] == last

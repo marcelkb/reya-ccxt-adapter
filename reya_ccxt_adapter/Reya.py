@@ -683,7 +683,14 @@ class Reya(ccxt.Exchange, ImplicitAPI):
             # (what triggers fire on) next to oracle and mid.
             raw = self.public_get_api_market_summary(self.extend(request, params or {}))
             parsed = self.parse_ticker(raw)
-            parsed["last"] = self.safe_float(raw, 'markPrice')
+            # Both venue generations serve this route, with different fields: measured
+            # 2026-09-27 a not-yet-switched mainnet sends throttledOraclePrice and
+            # throttledPoolPrice and no markPrice at all. Left as a bare markPrice read
+            # that returned None, and _fetch_positions then died computing PnL against
+            # it. The pool price is what the bot priced positions on before the cutover,
+            # so prefer it over the oracle price when the mark price is absent.
+            parsed["last"] = self.safe_float_n(raw, ['markPrice', 'throttledPoolPrice',
+                                                    'throttledOraclePrice', 'oraclePrice'])
             return parsed
         raw = self.public_get_api_trading_prices(self.extend(request, params or {}))
         parsed = self.parse_ticker(raw)
