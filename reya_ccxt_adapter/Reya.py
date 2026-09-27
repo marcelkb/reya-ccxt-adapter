@@ -820,15 +820,17 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         ohlcv.sort(key=lambda x: x[0])
         return ohlcv
 
-    def _getCollateralPriceUsd(self, ticker: str) -> float:
-        """USD oracle price for a collateral asset, looked up by its perp ticker."""
-        if REYA_V2:
-            asset = next(c["oracleAsset"] for c in self.COLLATERAL_HAIRCUTS.values() if c["ticker"] == ticker)
-            for entry in self.public_get_asset_oracle_prices({}):
-                # the venue spells some assets in mixed case (e.g. "wstETH")
-                if str(entry.get("asset")).upper() == asset:
-                    return float(entry.get("oraclePrice") or 0.0)
-            return 0.0
+    def _oraclePriceFromAssetList(self, ticker: str) -> float:
+        """perpOB venue: a single /assetOraclePrices call carries every collateral asset."""
+        asset = next(c["oracleAsset"] for c in self.COLLATERAL_HAIRCUTS.values() if c["ticker"] == ticker)
+        for entry in self.public_get_asset_oracle_prices({}):
+            # the venue spells some assets in mixed case (e.g. "wstETH")
+            if str(entry.get("asset")).upper() == asset:
+                return float(entry.get("oraclePrice") or 0.0)
+        return 0.0
+
+    def _oraclePriceFromPricesRoute(self, ticker: str) -> float:
+        """v1 venue: one /prices/{symbol} call per collateral ticker."""
         raw = self.public_get_api_trading_prices({"symbol": ticker})
         price = self.safe_float(raw, 'oraclePrice')
         if price is None:
@@ -836,6 +838,31 @@ class Reya(ccxt.Exchange, ImplicitAPI):
         if price is None:
             price = self.safe_float(raw, 'price')
         return float(price) if price else 0.0
+
+    def _getCollateralPriceUsd(self, ticker: str) -> float:
+        """USD oracle price for a collateral asset, looked up by its perp ticker.
+
+        The two venue generations serve mutually exclusive routes. Measured 2026-09-27:
+        mainnet (still v1) answers /prices/{symbol} and 404s /assetOraclePrices, devnet
+        (already perpOB) does exactly the reverse. The installed SDK decides which route
+        to try first, but it cannot decide which one the venue has actually deployed --
+        across the cutover the two disagree, and a 404 here would stop the bot from
+        reading its own balance. So fall back to the other generation's route, and let
+        the first route that answers win (a zero price included: that means the route
+        exists and does not know the asset, which is not a reason to retry)."""
+        routes = [self._oraclePriceFromAssetList, self._oraclePriceFromPricesRoute]
+        if not REYA_V2:
+            routes.reverse()
+        lastError = None
+        for route in routes:
+            try:
+                return route(ticker)
+            except ccxt.BaseError as exc:
+                logging.debug("🔀 collateral price route unavailable, trying the other one\n"
+                              "ticker: %s\n"
+                              "error: %s", ticker, exc)
+                lastError = exc
+        raise lastError
 
     def _initial_margin_rate(self, symbol: str) -> float:
         """Venue initial-margin RATE for a market: IM = |notional| × rate.

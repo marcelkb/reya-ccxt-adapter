@@ -6,7 +6,7 @@ test_sdk_loader.py says where each SDK comes from). No test touches the network.
 import os
 
 import pytest
-from ccxt import NotSupported, OrderNotFound
+from ccxt import ExchangeNotAvailable, NotSupported, OrderNotFound
 
 from reya_ccxt_adapter import Reya as ReyaModule
 from reya_ccxt_adapter.Reya import Reya
@@ -102,7 +102,10 @@ class FakeRest:
         self.calls.append((path, dict(params)))
         if path not in self.responses:
             raise AssertionError("unexpected request " + path)
-        return self.responses[path]
+        answer = self.responses[path]
+        if isinstance(answer, Exception):
+            raise answer  # a route this venue generation does not serve
+        return answer
 
 
 def makeLoadedExchange(responses):
@@ -160,6 +163,25 @@ def makeCollateralExchange(ticker, price):
 def test_collateral_price(ticker, expected):
     ex = makeCollateralExchange(ticker, expected)
     assert ex._getCollateralPriceUsd(ticker) == expected
+
+
+def test_collateral_price_falls_back_to_the_other_venue_route():
+    """The installed SDK and the deployed venue can disagree about which price route exists.
+
+    Measured 2026-09-27: mainnet (still v1) serves v2/prices/{symbol} and 404s
+    /assetOraclePrices, devnet (already perpOB) does exactly the reverse. So a v2
+    SDK pointed at a not-yet-switched mainnet must not fail to price collateral.
+    """
+    notFound = ExchangeNotAvailable('reya GET .../v2/... 404 Not Found {"404":"Not Found!"}')
+    if ReyaModule.REYA_V2:
+        responses = {"v2/assetOraclePrices": notFound,
+                     "v2/prices/{symbol}": {"symbol": "WETHRUSD", "oraclePrice": "2392.5"}}
+    else:
+        responses = {"v2/prices/{symbol}": notFound,
+                     "v2/assetOraclePrices": ORACLE_PRICES_V2}
+    ex, fake = makeLoadedExchange(responses)
+    assert ex._getCollateralPriceUsd("WETHRUSD") == 2392.5
+    assert len([c for c in fake.calls if c[0] != "v2/perpMarketDefinitions"]) == 2
 
 
 def test_staked_rusd_balance_uses_oracle_price():
